@@ -1,0 +1,248 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global Safety Net: Default-deny all paths
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Reusable Hardened Primitives
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && isVerified() && request.auth.uid == userId;
+    }
+
+    function userProfileExists(userId) {
+      return exists(/databases/$(database)/documents/users/$(userId));
+    }
+
+    function storyExists(userId, storyId) {
+      return exists(/databases/$(database)/documents/users/$(userId)/stories/$(storyId));
+    }
+
+    // Entity Validation Blueprints
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll(['uid', 'theme', 'speechRate', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'displayName', 'theme', 'speechRate', 'preferredVoice', 'createdAt', 'updatedAt'])
+        && isValidId(data.uid)
+        && data.uid == userId
+        && data.theme in ['light', 'dark', 'auto']
+        && data.speechRate is number
+        && data.speechRate >= 0.5
+        && data.speechRate <= 3.0
+        && (!('displayName' in data) || (data.displayName is string && data.displayName.size() <= 120))
+        && (!('preferredVoice' in data) || (data.preferredVoice is string && data.preferredVoice.size() <= 160))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidStory(data, userId, storyId) {
+      return data.keys().hasAll(['id', 'ownerId', 'title', 'chapterCount', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'ownerId', 'title', 'author', 'cover', 'chapterCount', 'createdAt', 'updatedAt'])
+        && isValidId(data.id)
+        && data.id == storyId
+        && isValidId(data.ownerId)
+        && data.ownerId == userId
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 200
+        && (!('author' in data) || (data.author is string && data.author.size() <= 120))
+        && (!('cover' in data) || (data.cover is string && data.cover.size() <= 250000))
+        && data.chapterCount is int && data.chapterCount >= 0 && data.chapterCount <= 10000
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidChapter(data, userId, storyId, chapterId) {
+      return data.keys().hasAll(['id', 'ownerId', 'storyId', 'index', 'title', 'text', 'charCount', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'ownerId', 'storyId', 'index', 'title', 'text', 'charCount', 'updatedAt'])
+        && isValidId(data.id)
+        && data.id == chapterId
+        && isValidId(data.ownerId)
+        && data.ownerId == userId
+        && isValidId(data.storyId)
+        && data.storyId == storyId
+        && data.index is int && data.index >= 0 && data.index <= 10000
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 200
+        && data.text is string && data.text.size() >= 1 && data.text.size() <= 600000
+        && data.charCount is int && data.charCount >= 1 && data.charCount <= 600000
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidProgress(data, userId, storyId) {
+      return data.keys().hasAll(['storyId', 'ownerId', 'chapterIndex', 'chunkIndex', 'audioTime', 'totalChunks', 'updatedAt'])
+        && data.keys().hasOnly(['storyId', 'ownerId', 'chapterIndex', 'chunkIndex', 'audioTime', 'totalChunks', 'chapterTitle', 'deviceName', 'updatedAt'])
+        && isValidId(data.storyId)
+        && data.storyId == storyId
+        && isValidId(data.ownerId)
+        && data.ownerId == userId
+        && data.chapterIndex is int && data.chapterIndex >= 0 && data.chapterIndex <= 10000
+        && data.chunkIndex is int && data.chunkIndex >= 0 && data.chunkIndex <= 100000
+        && data.audioTime is number && data.audioTime >= 0 && data.audioTime <= 86400
+        && data.totalChunks is int && data.totalChunks >= 0 && data.totalChunks <= 100000
+        && (!('chapterTitle' in data) || (data.chapterTitle is string && data.chapterTitle.size() <= 200))
+        && (!('deviceName' in data) || (data.deviceName is string && data.deviceName.size() <= 120))
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidPlaylistItem(item) {
+      return item is map
+        && item.keys().hasAll(['storyId', 'chapterIndex', 'storyTitle', 'chapterTitle'])
+        && item.keys().hasOnly(['storyId', 'chapterIndex', 'storyTitle', 'chapterTitle'])
+        && isValidId(item.storyId)
+        && item.chapterIndex is int && item.chapterIndex >= 0 && item.chapterIndex <= 10000
+        && item.storyTitle is string && item.storyTitle.size() >= 1 && item.storyTitle.size() <= 200
+        && item.chapterTitle is string && item.chapterTitle.size() >= 1 && item.chapterTitle.size() <= 200;
+    }
+
+    function isValidPlaylist(data, userId, playlistId) {
+      return data.keys().hasAll(['id', 'ownerId', 'name', 'items', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'ownerId', 'name', 'description', 'items', 'createdAt', 'updatedAt'])
+        && isValidId(data.id)
+        && data.id == playlistId
+        && isValidId(data.ownerId)
+        && data.ownerId == userId
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 120
+        && (!('description' in data) || (data.description is string && data.description.size() <= 300))
+        && data.items is list
+        && data.items.size() <= 200
+        && (data.items.size() == 0 || isValidPlaylistItem(data.items[0]))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // User Profile Collection
+    match /users/{userId} {
+      allow get: if isValidId(userId) && isOwner(userId);
+      allow list: if false;
+      allow create: if isValidId(userId)
+        && isOwner(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(userId)
+        && isOwner(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'theme', 'speechRate', 'preferredVoice', 'updatedAt']);
+      allow delete: if isValidId(userId) && isOwner(userId);
+
+      // Stories Subcollection
+      match /stories/{storyId} {
+        allow get: if isValidId(userId) && isValidId(storyId) && isOwner(userId);
+        allow list: if isValidId(userId) && isOwner(userId) && resource.data.ownerId == request.auth.uid;
+        allow create: if isValidId(userId)
+          && isValidId(storyId)
+          && isOwner(userId)
+          && isValidStory(incoming(), userId, storyId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && userProfileExists(userId);
+        allow update: if isValidId(userId)
+          && isValidId(storyId)
+          && isOwner(userId)
+          && isValidStory(incoming(), userId, storyId)
+          && incoming().id == existing().id
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'author', 'cover', 'chapterCount', 'updatedAt'])
+          && userProfileExists(userId);
+        allow delete: if isValidId(userId) && isValidId(storyId) && isOwner(userId);
+
+        // Chapters Subcollection
+        match /chapters/{chapterId} {
+          allow get: if isValidId(userId) && isValidId(storyId) && isValidId(chapterId) && isOwner(userId);
+          allow list: if isValidId(userId) && isValidId(storyId) && isOwner(userId) && resource.data.ownerId == request.auth.uid;
+          allow create: if isValidId(userId)
+            && isValidId(storyId)
+            && isValidId(chapterId)
+            && isOwner(userId)
+            && isValidChapter(incoming(), userId, storyId, chapterId)
+            && incoming().updatedAt == request.time
+            && userProfileExists(userId)
+            && storyExists(userId, storyId);
+          allow update: if isValidId(userId)
+            && isValidId(storyId)
+            && isValidId(chapterId)
+            && isOwner(userId)
+            && isValidChapter(incoming(), userId, storyId, chapterId)
+            && incoming().id == existing().id
+            && incoming().ownerId == existing().ownerId
+            && incoming().storyId == existing().storyId
+            && incoming().updatedAt == request.time
+            && incoming().diff(existing()).affectedKeys().hasOnly(['index', 'title', 'text', 'charCount', 'updatedAt'])
+            && userProfileExists(userId)
+            && storyExists(userId, storyId);
+          allow delete: if isValidId(userId) && isValidId(storyId) && isValidId(chapterId) && isOwner(userId);
+        }
+      }
+
+      // Listening Progress Subcollection
+      match /progress/{storyId} {
+        allow get: if isValidId(userId) && isValidId(storyId) && isOwner(userId);
+        allow list: if isValidId(userId) && isOwner(userId) && resource.data.ownerId == request.auth.uid;
+        allow create: if isValidId(userId)
+          && isValidId(storyId)
+          && isOwner(userId)
+          && isValidProgress(incoming(), userId, storyId)
+          && incoming().updatedAt == request.time
+          && userProfileExists(userId);
+        allow update: if isValidId(userId)
+          && isValidId(storyId)
+          && isOwner(userId)
+          && isValidProgress(incoming(), userId, storyId)
+          && incoming().storyId == existing().storyId
+          && incoming().ownerId == existing().ownerId
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['chapterIndex', 'chunkIndex', 'audioTime', 'totalChunks', 'chapterTitle', 'deviceName', 'updatedAt'])
+          && userProfileExists(userId);
+        allow delete: if isValidId(userId) && isValidId(storyId) && isOwner(userId);
+      }
+
+      // Custom Playlists Subcollection
+      match /playlists/{playlistId} {
+        allow get: if isValidId(userId) && isValidId(playlistId) && isOwner(userId);
+        allow list: if isValidId(userId) && isOwner(userId) && resource.data.ownerId == request.auth.uid;
+        allow create: if isValidId(userId)
+          && isValidId(playlistId)
+          && isOwner(userId)
+          && isValidPlaylist(incoming(), userId, playlistId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && userProfileExists(userId);
+        allow update: if isValidId(userId)
+          && isValidId(playlistId)
+          && isOwner(userId)
+          && isValidPlaylist(incoming(), userId, playlistId)
+          && incoming().id == existing().id
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'description', 'items', 'updatedAt'])
+          && userProfileExists(userId);
+        allow delete: if isValidId(userId) && isValidId(playlistId) && isOwner(userId);
+      }
+    }
+  }
+}

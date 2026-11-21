@@ -1,0 +1,415 @@
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  ArrowLeft,
+  ChevronDown,
+  Lock,
+  Pause,
+  Play,
+  RotateCcw,
+  RotateCw,
+  SkipBack,
+  SkipForward,
+  SlidersHorizontal,
+  Sun,
+  Timer,
+  Volume2,
+} from 'lucide-react';
+import { StoryCover } from '@/src/components/StoryCover';
+import type { AmbientMode, ChapterContent, Story, TextChunk } from '@/src/types';
+
+interface Props {
+  story: Story;
+  chapter: ChapterContent;
+  chapterIndex: number;
+  chunks: TextChunk[];
+  chunkIndex: number;
+  isPlaying: boolean;
+  isNativeAudio: boolean;
+  audioCurrentTime: number;
+  audioDuration: number;
+  voices: SpeechSynthesisVoice[];
+  selectedVoiceName: string;
+  rate: number;
+  sleepMinutes: number;
+  ambientMode: AmbientMode;
+  wakeLockEnabled: boolean;
+  playlistLabel?: string;
+  onBack: () => void;
+  onTogglePlay: () => void;
+  onPrevChapter: () => void;
+  onNextChapter: () => void;
+  onSeekChunk: (index: number) => void;
+  onSeekAudioTime: (seconds: number) => void;
+  onChangeVoice: (name: string) => void;
+  onChangeRate: (rate: number) => void;
+  onChangeSleep: (minutes: number) => void;
+  onChangeAmbient: (mode: AmbientMode) => void;
+  onToggleWakeLock: () => void;
+}
+
+function formatTime(sec: number): string {
+  if (!isFinite(sec) || sec < 0) return '0:00';
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+export const ReaderPlayerView: React.FC<Props> = ({
+  story,
+  chapter,
+  chapterIndex,
+  chunks,
+  chunkIndex,
+  isPlaying,
+  isNativeAudio,
+  audioCurrentTime,
+  audioDuration,
+  voices,
+  selectedVoiceName,
+  rate,
+  sleepMinutes,
+  ambientMode,
+  wakeLockEnabled,
+  playlistLabel,
+  onBack,
+  onTogglePlay,
+  onPrevChapter,
+  onNextChapter,
+  onSeekChunk,
+  onSeekAudioTime,
+  onChangeVoice,
+  onChangeRate,
+  onChangeSleep,
+  onChangeAmbient,
+  onToggleWakeLock,
+}) => {
+  const [fontSize, setFontSize] = useState<'sm' | 'md' | 'lg'>('md');
+  const [showAudioOpts, setShowAudioOpts] = useState(false);
+  const activeSpanRef = useRef<HTMLSpanElement | null>(null);
+
+  useEffect(() => {
+    if (activeSpanRef.current) {
+      activeSpanRef.current.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }
+  }, [chunkIndex, chapter.id]);
+
+  const paragraphs = useMemo(() => {
+    const groups: { pIdx: number; items: { idx: number; text: string }[] }[] = [];
+    chunks.forEach((c, idx) => {
+      let last = groups[groups.length - 1];
+      if (!last || last.pIdx !== c.p) {
+        last = { pIdx: c.p, items: [] };
+        groups.push(last);
+      }
+      last.items.push({ idx, text: c.t });
+    });
+    return groups;
+  }, [chunks]);
+
+  const proseSizeClass =
+    fontSize === 'sm'
+      ? 'text-[16px] leading-[1.85]'
+      : fontSize === 'lg'
+        ? 'text-[20px] leading-[2]'
+        : 'text-[18px] leading-[1.95]';
+
+  return (
+    <div className="space-y-5 pb-10">
+      {/* Top Bar */}
+      <div className="flex items-center justify-between gap-3">
+        <button
+          onClick={onBack}
+          className="min-h-[44px] inline-flex items-center gap-2 px-3 rounded-xl text-sm font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-200/70 dark:hover:bg-slate-800 cursor-pointer"
+        >
+          <ArrowLeft className="w-4 h-4" />
+          <span>Quay lại</span>
+        </button>
+
+        <div className="flex items-center gap-1.5">
+          <div className="flex items-center rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#1a1d24] p-0.5">
+            {(['sm', 'md', 'lg'] as const).map((sz, i) => (
+              <button
+                key={sz}
+                onClick={() => setFontSize(sz)}
+                className={`min-h-[34px] px-2.5 rounded-lg text-xs font-semibold cursor-pointer ${
+                  fontSize === sz
+                    ? 'bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900'
+                    : 'text-slate-600 dark:text-slate-400'
+                }`}
+              >
+                {i === 0 ? 'A-' : i === 1 ? 'A' : 'A+'}
+              </button>
+            ))}
+          </div>
+          <button
+            onClick={() => setShowAudioOpts((v) => !v)}
+            className={`min-h-[40px] px-3 rounded-xl border text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer ${
+              showAudioOpts
+                ? 'border-blue-500 bg-blue-500/10 text-blue-600 dark:text-blue-400'
+                : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-[#1a1d24] text-slate-700 dark:text-slate-300'
+            }`}
+          >
+            <SlidersHorizontal className="w-4 h-4" />
+            <span>Tùy chỉnh phát</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Player Control Card */}
+      <div className="rounded-2xl bg-white dark:bg-[#1a1d24] border border-slate-200 dark:border-slate-800 p-5 space-y-4">
+        <div className="flex items-center gap-4">
+          <StoryCover
+            title={story.title}
+            cover={story.cover}
+            className="w-16 h-20 rounded-xl shrink-0"
+          />
+          <div className="min-w-0 flex-1">
+            <div className="text-xs font-medium text-blue-600 dark:text-blue-400 truncate">
+              {playlistLabel ? `Danh sách phát: ${playlistLabel}` : story.title}
+            </div>
+            <h2 className="text-lg font-bold text-slate-900 dark:text-slate-100 truncate mt-0.5">
+              {chapter.title}
+            </h2>
+            <div className="text-xs text-slate-500 dark:text-slate-400 mt-0.5 flex items-center gap-2 flex-wrap tabular-nums">
+              <span>
+                Chương {chapterIndex + 1}/{story.chapters.length}
+              </span>
+              <span aria-hidden="true">·</span>
+              <span className="inline-flex items-center gap-1">
+                <Lock className="w-3 h-3" />
+                <span>Hỗ trợ khóa màn hình</span>
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {/* Scrubber */}
+        <div className="space-y-1.5">
+          {isNativeAudio ? (
+            <>
+              <input
+                type="range"
+                min={0}
+                max={Math.max(1, Math.floor(audioDuration || 100))}
+                value={Math.floor(audioCurrentTime)}
+                onChange={(e) => onSeekAudioTime(Number(e.target.value))}
+                className="w-full accent-blue-600 cursor-pointer"
+              />
+              <div className="flex justify-between text-xs text-slate-500 dark:text-slate-400 tabular-nums">
+                <span>{formatTime(audioCurrentTime)}</span>
+                <span>{formatTime(audioDuration)}</span>
+              </div>
+            </>
+          ) : (
+            <>
+              <input
+                type="range"
+                min={0}
+                max={Math.max(0, chunks.length - 1)}
+                value={Math.min(chunkIndex, Math.max(0, chunks.length - 1))}
+                onChange={(e) => onSeekChunk(Number(e.target.value))}
+                className="w-full accent-blue-600 cursor-pointer"
+              />
+              <div className="flex justify-between text-xs text-slate-500 dark:text-slate-400 tabular-nums">
+                <span>
+                  Đoạn {Math.min(chunkIndex + 1, chunks.length)}/{chunks.length}
+                </span>
+                <span>
+                  {chunks.length > 0
+                    ? `${Math.round(((chunkIndex + 1) / chunks.length) * 100)}%`
+                    : '0%'}
+                </span>
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* Transport Controls */}
+        <div className="flex items-center justify-center gap-3 sm:gap-5">
+          <button
+            onClick={onPrevChapter}
+            title="Chương trước"
+            className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-full text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+          >
+            <SkipBack className="w-5 h-5" />
+          </button>
+
+          <button
+            onClick={() =>
+              isNativeAudio
+                ? onSeekAudioTime(Math.max(0, audioCurrentTime - 15))
+                : onSeekChunk(Math.max(0, chunkIndex - 1))
+            }
+            title={isNativeAudio ? 'Lùi 15 giây' : 'Câu trước'}
+            className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-full text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+          >
+            <RotateCcw className="w-5 h-5" />
+          </button>
+
+          <button
+            onClick={onTogglePlay}
+            aria-label={isPlaying ? 'Tạm dừng' : 'Phát'}
+            className="w-14 h-14 rounded-full bg-blue-600 text-white flex items-center justify-center shadow-md hover:bg-blue-700 active:scale-95 transition cursor-pointer"
+          >
+            {isPlaying ? (
+              <Pause className="w-6 h-6" />
+            ) : (
+              <Play className="w-6 h-6 ml-0.5" />
+            )}
+          </button>
+
+          <button
+            onClick={() =>
+              isNativeAudio
+                ? onSeekAudioTime(Math.min(audioDuration || 0, audioCurrentTime + 15))
+                : onSeekChunk(Math.min(Math.max(0, chunks.length - 1), chunkIndex + 1))
+            }
+            title={isNativeAudio ? 'Tiến 15 giây' : 'Câu sau'}
+            className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-full text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+          >
+            <RotateCw className="w-5 h-5" />
+          </button>
+
+          <button
+            onClick={onNextChapter}
+            title="Chương sau"
+            className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-full text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+          >
+            <SkipForward className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Collapsible Audio & Background Options */}
+        {showAudioOpts && (
+          <div className="pt-4 border-t border-slate-100 dark:border-slate-800 grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+            {!isNativeAudio && (
+              <div>
+                <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                  Giọng đọc thiết bị
+                </label>
+                <div className="relative">
+                  <select
+                    value={selectedVoiceName}
+                    onChange={(e) => onChangeVoice(e.target.value)}
+                    className="w-full min-h-[40px] pl-3 pr-8 rounded-xl bg-slate-50 dark:bg-[#111318] border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-slate-100 appearance-none"
+                  >
+                    {voices.length === 0 ? (
+                      <option value="">Giọng mặc định hệ thống</option>
+                    ) : (
+                      voices.map((v) => (
+                        <option key={`${v.name}-${v.lang}`} value={v.name}>
+                          {v.name} ({v.lang})
+                        </option>
+                      ))
+                    )}
+                  </select>
+                  <ChevronDown className="w-4 h-4 text-slate-400 absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                </div>
+              </div>
+            )}
+
+            <div>
+              <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                Tốc độ đọc
+              </label>
+              <select
+                value={rate}
+                onChange={(e) => onChangeRate(Number(e.target.value))}
+                className="w-full min-h-[40px] px-3 rounded-xl bg-slate-50 dark:bg-[#111318] border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-slate-100"
+              >
+                {[0.75, 0.9, 1, 1.15, 1.25, 1.5, 1.75, 2].map((r) => (
+                  <option key={r} value={r}>
+                    {r}×
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="flex items-center gap-1.5 font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                <Timer className="w-3.5 h-3.5" />
+                <span>Hẹn giờ tắt</span>
+              </label>
+              <select
+                value={sleepMinutes}
+                onChange={(e) => onChangeSleep(Number(e.target.value))}
+                className="w-full min-h-[40px] px-3 rounded-xl bg-slate-50 dark:bg-[#111318] border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-slate-100"
+              >
+                <option value={0}>Tắt hẹn giờ</option>
+                <option value={15}>15 phút</option>
+                <option value={30}>30 phút</option>
+                <option value={45}>45 phút</option>
+                <option value={60}>60 phút</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="flex items-center gap-1.5 font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                <Volume2 className="w-3.5 h-3.5" />
+                <span>Âm thanh giữ phát nền</span>
+              </label>
+              <select
+                value={ambientMode}
+                onChange={(e) => onChangeAmbient(e.target.value as AmbientMode)}
+                className="w-full min-h-[40px] px-3 rounded-xl bg-slate-50 dark:bg-[#111318] border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-slate-100"
+              >
+                <option value="silent">Im lặng (Giữ phiên phát nền)</option>
+                <option value="rain">Tiếng mưa nhẹ thư giãn</option>
+                <option value="brown">Tiếng ồn nâu ấm (Dễ ngủ)</option>
+              </select>
+            </div>
+
+            <div className="sm:col-span-2 flex items-center justify-between rounded-xl bg-slate-50 dark:bg-[#111318] border border-slate-200 dark:border-slate-800 px-3.5 py-2.5">
+              <div className="flex items-center gap-2 text-slate-700 dark:text-slate-300">
+                <Sun className="w-4 h-4 text-amber-500" />
+                <span>Giữ sáng màn hình khi đang đọc chữ</span>
+              </div>
+              <button
+                type="button"
+                onClick={onToggleWakeLock}
+                className={`min-h-[32px] px-3 rounded-lg font-semibold cursor-pointer ${
+                  wakeLockEnabled
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
+                }`}
+              >
+                {wakeLockEnabled ? 'Đang bật' : 'Tắt'}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Synchronized Prose Area */}
+      <div className="rounded-2xl bg-white dark:bg-[#1a1d24] border border-slate-200 dark:border-slate-800 p-5 sm:p-8">
+        <div className={`font-serif text-slate-800 dark:text-slate-200 ${proseSizeClass}`}>
+          {paragraphs.map((para) => (
+            <p key={para.pIdx} className="mb-5 last:mb-0">
+              {para.items.map((item) => {
+                const active = !isNativeAudio && item.idx === chunkIndex;
+                return (
+                  <span
+                    key={item.idx}
+                    ref={active ? activeSpanRef : undefined}
+                    onClick={() => {
+                      if (!isNativeAudio) onSeekChunk(item.idx);
+                    }}
+                    className={`rounded px-0.5 transition-colors ${
+                      !isNativeAudio ? 'cursor-pointer hover:bg-blue-500/10' : ''
+                    } ${
+                      active
+                        ? 'bg-blue-500/20 dark:bg-blue-500/30 text-slate-950 dark:text-white'
+                        : ''
+                    }`}
+                  >
+                    {item.text}{' '}
+                  </span>
+                );
+              })}
+            </p>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+};

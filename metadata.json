@@ -1,0 +1,6 @@
+{
+  "name": "Truyện Audio",
+  "description": "Ứng dụng PWA nghe truyện audio ngoại tuyến, phát nền khi tắt màn hình, tải xuống chương nghe offline, danh sách phát tùy chỉnh và đồng bộ tiến trình đa thiết bị.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
