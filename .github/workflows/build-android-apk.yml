@@ -19,7 +19,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Setup Java 21
         uses: actions/setup-java@v4
@@ -28,15 +28,17 @@ jobs:
           java-version: '21'
 
       - name: Install dependencies
-        run: npm install
+        run: npm install --legacy-peer-deps
 
       - name: Build web bundle
         run: npm run build
 
       - name: Install Capacitor Android tooling
-        run: npm install --no-save @capacitor/core@^7.0.0 @capacitor/cli@^7.0.0 @capacitor/android@^7.0.0
+        run: npm install --no-save --legacy-peer-deps @capacitor/core@^7.0.0 @capacitor/cli@^7.0.0 @capacitor/android@^7.0.0
 
       - name: Generate Android project
+        env:
+          CI: 'true'
         run: |
           if [ ! -d "android" ]; then
             npx cap add android
@@ -64,16 +66,19 @@ jobs:
             }
             fs.writeFileSync(manifestPath, xml, "utf8");
           '
-          for dir in android/app/src/main/res/mipmap-*; do
+          for dir in android/app/src/main/res/mipmap-mdpi android/app/src/main/res/mipmap-hdpi android/app/src/main/res/mipmap-xhdpi android/app/src/main/res/mipmap-xxhdpi android/app/src/main/res/mipmap-xxxhdpi; do
             if [ -d "$dir" ]; then
-              cp public/pwa-192x192.png "$dir/ic_launcher.png" || true
-              cp public/pwa-192x192.png "$dir/ic_launcher_round.png" || true
-              cp public/pwa-512x512.png "$dir/ic_launcher_foreground.png" || true
+              [ -f "$dir/ic_launcher.png" ] && cp public/pwa-192x192.png "$dir/ic_launcher.png" || true
+              [ -f "$dir/ic_launcher_round.png" ] && cp public/pwa-192x192.png "$dir/ic_launcher_round.png" || true
+              [ -f "$dir/ic_launcher_foreground.png" ] && cp public/pwa-512x512.png "$dir/ic_launcher_foreground.png" || true
             fi
           done
 
       - name: Build Debug APK with Gradle
         run: |
+          if [ -n "$ANDROID_HOME" ] && [ -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
+            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null 2>&1 || true
+          fi
           cd android
           chmod +x gradlew
           ./gradlew assembleDebug --no-daemon
