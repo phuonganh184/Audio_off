@@ -1,9 +1,13 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { type User } from 'firebase/auth';
 import {
+  AlertCircle,
   Cloud,
+  Eye,
+  EyeOff,
   LogIn,
   LogOut,
+  Mail,
   Monitor,
   Moon,
   RefreshCw,
@@ -25,7 +29,12 @@ interface Props {
   deviceName: string;
   onChangeTheme: (mode: ThemeMode) => void;
   onChangeDeviceName: (name: string) => void;
-  onSignIn: () => Promise<void>;
+  onSignInGoogle: () => Promise<void>;
+  onSignInEmail: (email: string, password: string) => Promise<void>;
+  onRegisterEmail: (email: string, password: string) => Promise<void>;
+  onResetPassword: (email: string) => Promise<void>;
+  onResendVerification: () => Promise<void>;
+  onReloadVerification: () => Promise<void>;
   onSignOut: () => Promise<void>;
   onSyncNow: () => Promise<void>;
 }
@@ -42,10 +51,57 @@ export const SyncSettingsView: React.FC<Props> = ({
   deviceName,
   onChangeTheme,
   onChangeDeviceName,
-  onSignIn,
+  onSignInGoogle,
+  onSignInEmail,
+  onRegisterEmail,
+  onResetPassword,
+  onResendVerification,
+  onReloadVerification,
   onSignOut,
   onSyncNow,
 }) => {
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [showPass, setShowPass] = useState(false);
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+
+  const handleSubmitEmail = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!email.trim() || !password || authBusy) return;
+    setAuthError(null);
+    setAuthBusy(true);
+    try {
+      if (authMode === 'login') {
+        await onSignInEmail(email.trim(), password);
+      } else {
+        await onRegisterEmail(email.trim(), password);
+      }
+      setPassword('');
+    } catch (err) {
+      setAuthError(err instanceof Error ? err.message : 'Không thể xác thực tài khoản.');
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const handleReset = async () => {
+    if (!email.trim()) {
+      setAuthError('Hãy nhập email của bạn vào ô phía trên trước khi bấm quên mật khẩu.');
+      return;
+    }
+    setAuthError(null);
+    setAuthBusy(true);
+    try {
+      await onResetPassword(email.trim());
+    } catch (err) {
+      setAuthError(err instanceof Error ? err.message : 'Không gửi được email đặt lại mật khẩu.');
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div>
@@ -53,7 +109,7 @@ export const SyncSettingsView: React.FC<Props> = ({
           Đồng bộ & Cài đặt ứng dụng
         </h2>
         <p className="text-sm text-slate-600 dark:text-slate-400 mt-0.5">
-          Đồng bộ tiến trình nghe, thư viện và danh sách phát giữa điện thoại & máy tính
+          Đồng bộ tiến trình nghe, thư viện và danh sách phát giữa điện thoại (APK / PWA) & máy tính
         </p>
       </div>
 
@@ -72,7 +128,7 @@ export const SyncSettingsView: React.FC<Props> = ({
                 {!authReady
                   ? 'Đang kiểm tra phiên đăng nhập…'
                   : user
-                    ? `Đã đăng nhập: ${user.email || user.displayName}`
+                    ? `Tài khoản: ${user.email || user.displayName}`
                     : 'Chưa đăng nhập — Dữ liệu hiện chỉ lưu cục bộ trên máy này'}
               </p>
             </div>
@@ -90,44 +146,185 @@ export const SyncSettingsView: React.FC<Props> = ({
         </div>
 
         {user ? (
-          <div className="space-y-3 pt-2 border-t border-slate-100 dark:border-slate-800">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="text-xs text-slate-600 dark:text-slate-400 tabular-nums">
-                {syncStatusText ||
-                  (lastSyncedAt
-                    ? `Lần đồng bộ gần nhất: ${new Date(lastSyncedAt).toLocaleTimeString('vi-VN')}`
-                    : 'Sẵn sàng đồng bộ')}
-                {pendingSyncCount > 0 ? ` · ${pendingSyncCount} thay đổi chờ gửi` : ''}
+          !user.emailVerified ? (
+            <div className="pt-3 border-t border-slate-100 dark:border-slate-800 space-y-3">
+              <div className="rounded-xl bg-amber-500/12 border border-amber-500/30 p-3.5 text-xs text-amber-900 dark:text-amber-200 space-y-1.5">
+                <div className="font-semibold flex items-center gap-1.5">
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  <span>Cần xác minh email để bật đồng bộ đám mây</span>
+                </div>
+                <p className="leading-relaxed">
+                  Hệ thống đã gửi link xác minh tới <strong>{user.email}</strong>. Hãy mở hộp thư
+                  (kiểm tra cả thư mục Spam), bấm vào link xác nhận rồi quay lại nhấn nút bên dưới.
+                </p>
               </div>
+              <div className="flex flex-wrap gap-2.5">
+                <button
+                  onClick={onReloadVerification}
+                  disabled={!isOnline}
+                  className="min-h-[44px] px-4 rounded-xl bg-blue-600 text-white text-xs sm:text-sm font-semibold hover:bg-blue-700 disabled:opacity-50 cursor-pointer"
+                >
+                  Tôi đã xác minh — Kiểm tra lại
+                </button>
+                <button
+                  onClick={onResendVerification}
+                  disabled={!isOnline}
+                  className="min-h-[44px] px-4 rounded-xl border border-slate-200 dark:border-slate-700 text-xs sm:text-sm font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50 cursor-pointer"
+                >
+                  Gửi lại email xác minh
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-3 pt-2 border-t border-slate-100 dark:border-slate-800">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="text-xs text-slate-600 dark:text-slate-400 tabular-nums">
+                  {syncStatusText ||
+                    (lastSyncedAt
+                      ? `Lần đồng bộ gần nhất: ${new Date(lastSyncedAt).toLocaleTimeString('vi-VN')}`
+                      : 'Sẵn sàng đồng bộ')}
+                  {pendingSyncCount > 0 ? ` · ${pendingSyncCount} thay đổi chờ gửi` : ''}
+                </div>
+                <button
+                  onClick={onSyncNow}
+                  disabled={isSyncing || !isOnline}
+                  className="min-h-[44px] px-4 rounded-xl bg-blue-600 text-white text-sm font-semibold inline-flex items-center gap-2 hover:bg-blue-700 disabled:opacity-50 cursor-pointer"
+                >
+                  <RefreshCw className={`w-4 h-4 ${isSyncing ? 'animate-spin' : ''}`} />
+                  <span>{isSyncing ? 'Đang đồng bộ…' : 'Đồng bộ ngay'}</span>
+                </button>
+              </div>
+              <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+                Tiến trình nghe tự động lưu cục bộ và gửi lên đám mây khi tạm dừng hoặc chuyển
+                chương. Đăng nhập cùng tài khoản này trên máy tính và file APK điện thoại để đồng
+                bộ mọi lúc.
+              </p>
+            </div>
+          )
+        ) : (
+          <div className="pt-3 border-t border-slate-100 dark:border-slate-800 space-y-4">
+            {/* Segmented Mode Toggle */}
+            <div className="flex items-center gap-1 p-1 rounded-xl bg-slate-100 dark:bg-[#111318] border border-slate-200 dark:border-slate-800 w-fit">
               <button
-                onClick={onSyncNow}
-                disabled={isSyncing || !isOnline}
-                className="min-h-[44px] px-4 rounded-xl bg-blue-600 text-white text-sm font-semibold inline-flex items-center gap-2 hover:bg-blue-700 disabled:opacity-50 cursor-pointer"
+                type="button"
+                onClick={() => {
+                  setAuthMode('login');
+                  setAuthError(null);
+                }}
+                className={`min-h-[36px] px-4 rounded-lg text-xs font-semibold transition cursor-pointer ${
+                  authMode === 'login'
+                    ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-xs'
+                    : 'text-slate-600 dark:text-slate-400'
+                }`}
               >
-                <RefreshCw className={`w-4 h-4 ${isSyncing ? 'animate-spin' : ''}`} />
-                <span>{isSyncing ? 'Đang đồng bộ…' : 'Đồng bộ ngay'}</span>
+                Đăng nhập Email
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setAuthMode('register');
+                  setAuthError(null);
+                }}
+                className={`min-h-[36px] px-4 rounded-lg text-xs font-semibold transition cursor-pointer ${
+                  authMode === 'register'
+                    ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-xs'
+                    : 'text-slate-600 dark:text-slate-400'
+                }`}
+              >
+                Đăng ký mới
               </button>
             </div>
-            <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
-              Tiến trình nghe của bạn tự động lưu cục bộ và gửi lên đám mây mỗi khi tạm dừng hoặc
-              chuyển chương. Trên thiết bị khác, đăng nhập cùng tài khoản Google để nhận danh sách
-              truyện và tiếp tục nghe đúng vị trí đang dở.
-            </p>
-          </div>
-        ) : (
-          <div className="pt-2 border-t border-slate-100 dark:border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <p className="text-xs text-slate-600 dark:text-slate-400">
-              Đăng nhập Google để sao lưu thư viện truyện, danh sách phát và vị trí đang nghe giữa
-              các máy.
-            </p>
-            <button
-              onClick={onSignIn}
-              disabled={!isOnline || !authReady}
-              className="min-h-[44px] px-4 rounded-xl bg-blue-600 text-white text-sm font-semibold inline-flex items-center justify-center gap-2 hover:bg-blue-700 disabled:opacity-50 shrink-0 cursor-pointer"
-            >
-              <LogIn className="w-4 h-4" />
-              <span>Đăng nhập Google</span>
-            </button>
+
+            <form onSubmit={handleSubmitEmail} className="space-y-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                    Email
+                  </label>
+                  <input
+                    type="email"
+                    required
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    placeholder="email@gmail.com"
+                    autoComplete="email"
+                    className="w-full min-h-[44px] px-3.5 rounded-xl bg-slate-50 dark:bg-[#111318] border border-slate-200 dark:border-slate-800 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500/40"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                    Mật khẩu (tối thiểu 6 ký tự)
+                  </label>
+                  <div className="relative">
+                    <input
+                      type={showPass ? 'text' : 'password'}
+                      required
+                      minLength={6}
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      placeholder="••••••"
+                      autoComplete={authMode === 'login' ? 'current-password' : 'new-password'}
+                      className="w-full min-h-[44px] pl-3.5 pr-10 rounded-xl bg-slate-50 dark:bg-[#111318] border border-slate-200 dark:border-slate-800 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500/40"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPass((v) => !v)}
+                      aria-label="Hiện hoặc ẩn mật khẩu"
+                      className="absolute right-2 top-1/2 -translate-y-1/2 min-h-[36px] min-w-[36px] flex items-center justify-center text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 cursor-pointer"
+                    >
+                      {showPass ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {authError && (
+                <p className="text-xs text-red-600 dark:text-red-400 font-medium">{authError}</p>
+              )}
+
+              <div className="flex flex-wrap items-center justify-between gap-2.5">
+                <button
+                  type="submit"
+                  disabled={!isOnline || !authReady || authBusy}
+                  className="min-h-[44px] px-5 rounded-xl bg-blue-600 text-white text-sm font-semibold inline-flex items-center justify-center gap-2 hover:bg-blue-700 disabled:opacity-50 cursor-pointer"
+                >
+                  <Mail className="w-4 h-4" />
+                  <span>
+                    {authBusy
+                      ? 'Đang xử lý…'
+                      : authMode === 'login'
+                        ? 'Đăng nhập & Đồng bộ'
+                        : 'Tạo tài khoản đồng bộ'}
+                  </span>
+                </button>
+
+                {authMode === 'login' && (
+                  <button
+                    type="button"
+                    onClick={handleReset}
+                    disabled={!isOnline || authBusy}
+                    className="min-h-[40px] px-2 text-xs font-medium text-blue-600 dark:text-blue-400 hover:underline disabled:opacity-50 cursor-pointer"
+                  >
+                    Quên mật khẩu?
+                  </button>
+                )}
+              </div>
+            </form>
+
+            <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <span className="text-xs text-slate-500 dark:text-slate-400">
+                Hoặc đăng nhập nhanh bằng Google (dành cho trình duyệt Web / PWA):
+              </span>
+              <button
+                type="button"
+                onClick={onSignInGoogle}
+                disabled={!isOnline || !authReady}
+                className="min-h-[40px] px-4 rounded-xl border border-slate-200 dark:border-slate-700 text-xs sm:text-sm font-semibold text-slate-800 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 inline-flex items-center justify-center gap-2 disabled:opacity-50 shrink-0 cursor-pointer"
+              >
+                <LogIn className="w-4 h-4" />
+                <span>Đăng nhập Google</span>
+              </button>
+            </div>
           </div>
         )}
       </div>
@@ -173,7 +370,7 @@ export const SyncSettingsView: React.FC<Props> = ({
             value={deviceName}
             onChange={(e) => onChangeDeviceName(e.target.value)}
             maxLength={40}
-            placeholder="Ví dụ: iPhone của tôi"
+            placeholder="Ví dụ: Điện thoại Android"
             className="w-full min-h-[44px] px-3.5 rounded-xl bg-slate-50 dark:bg-[#111318] border border-slate-200 dark:border-slate-800 text-sm text-slate-900 dark:text-slate-100"
           />
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">

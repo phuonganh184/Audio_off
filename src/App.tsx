@@ -1,5 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { onAuthStateChanged, signInWithPopup, signOut, type User } from 'firebase/auth';
+import {
+  createUserWithEmailAndPassword,
+  onAuthStateChanged,
+  sendEmailVerification,
+  sendPasswordResetEmail,
+  signInWithEmailAndPassword,
+  signInWithPopup,
+  signOut,
+  type User,
+} from 'firebase/auth';
 import { registerSW } from 'virtual:pwa-register';
 import {
   BookOpen,
@@ -96,6 +105,7 @@ export default function App() {
 
   // Auth & Cloud Sync state
   const [user, setUser] = useState<User | null>(null);
+  const [, setAuthTick] = useState(0);
   const [authReady, setAuthReady] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncStatusText, setSyncStatusText] = useState('');
@@ -283,7 +293,7 @@ export default function App() {
       await putProgress(entry);
       setProgressMap((prev) => ({ ...prev, [storyId]: entry }));
 
-      if (syncImmediately && userRef.current) {
+      if (syncImmediately && userRef.current?.emailVerified) {
         if (isOnlineRef.current) {
           try {
             await ensureUserProfile(userRef.current, {
@@ -614,7 +624,7 @@ export default function App() {
           toast('Chương này chưa được tải ngoại tuyến. Hãy kết nối mạng để tải về máy.');
           return;
         }
-        if (!userRef.current) {
+        if (!userRef.current || !userRef.current.emailVerified) {
           toast('Không tìm thấy dữ liệu chương trên máy.');
           return;
         }
@@ -730,7 +740,7 @@ export default function App() {
   const handleSyncNow = useCallback(
     async (targetUser?: User) => {
       const u = targetUser || userRef.current;
-      if (!u || !isOnlineRef.current || isSyncing) return;
+      if (!u || !u.emailVerified || !isOnlineRef.current || isSyncing) return;
       setIsSyncing(true);
       try {
         const res = await syncAllWithCloud(
@@ -767,7 +777,7 @@ export default function App() {
     const unsub = onAuthStateChanged(auth, (u) => {
       setUser(u);
       setAuthReady(true);
-      if (u && isOnlineRef.current) {
+      if (u && u.emailVerified && isOnlineRef.current) {
         handleSyncNow(u);
       }
     });
@@ -777,7 +787,7 @@ export default function App() {
 
   // Auto-flush offline queue when network returns
   useEffect(() => {
-    if (isOnline && user && pendingSyncCount > 0 && !isSyncing) {
+    if (isOnline && user && user.emailVerified && pendingSyncCount > 0 && !isSyncing) {
       handleSyncNow(user);
     }
   }, [isOnline, user, pendingSyncCount, isSyncing, handleSyncNow]);
@@ -814,7 +824,7 @@ export default function App() {
       updatedAt: now,
     };
     await putStory(newStory);
-    if (user && isOnline) {
+    if (user && user.emailVerified && isOnline) {
       try {
         await ensureUserProfile(user, { theme, speechRate: rate, preferredVoice: selectedVoiceName });
         await pushStoryAndChapters(user.uid, newStory);
@@ -827,7 +837,7 @@ export default function App() {
           createdAt: Date.now(),
         });
       }
-    } else if (user) {
+    } else if (user && user.emailVerified) {
       await enqueueSync({
         id: `st_${newStory.id}`,
         kind: 'story',
@@ -892,7 +902,7 @@ export default function App() {
         updatedAt: Date.now(),
       };
       await putStory(updated);
-      if (user && isOnline) {
+      if (user && user.emailVerified && isOnline) {
         try {
           await ensureUserProfile(user, { theme, speechRate: rate, preferredVoice: selectedVoiceName });
           await pushStoryAndChapters(user.uid, updated);
@@ -905,7 +915,7 @@ export default function App() {
             createdAt: Date.now(),
           });
         }
-      } else if (user) {
+      } else if (user && user.emailVerified) {
         await enqueueSync({
           id: `st_${updated.id}`,
           kind: 'story',
@@ -930,9 +940,9 @@ export default function App() {
       const cover = await processCoverImage(file);
       const updated: Story = { ...st, cover, updatedAt: Date.now() };
       await putStory(updated);
-      if (user && isOnline) {
+      if (user && user.emailVerified && isOnline) {
         await pushStoryAndChapters(user.uid, updated);
-      } else if (user) {
+      } else if (user && user.emailVerified) {
         await enqueueSync({
           id: `st_${updated.id}`,
           kind: 'story',
@@ -962,7 +972,7 @@ export default function App() {
         }
         await deleteStoryLocal(storyId);
         if (selectedStoryId === storyId) setSelectedStoryId(null);
-        if (user && isOnline) {
+        if (user && user.emailVerified && isOnline) {
           try {
             await deleteStoryFromCloud(user.uid, storyId);
           } catch {
@@ -973,7 +983,7 @@ export default function App() {
               createdAt: Date.now(),
             });
           }
-        } else if (user) {
+        } else if (user && user.emailVerified) {
           await enqueueSync({
             id: `del_st_${storyId}`,
             kind: 'delete_story',
@@ -1007,7 +1017,7 @@ export default function App() {
           .map((c, idx) => ({ ...c, index: idx }));
         const updated: Story = { ...st, chapters: remaining, updatedAt: Date.now() };
         await putStory(updated);
-        if (user && isOnline) {
+        if (user && user.emailVerified && isOnline) {
           await pushStoryAndChapters(user.uid, updated);
         }
         await refreshLocalData();
@@ -1018,7 +1028,7 @@ export default function App() {
 
   const handleDownloadStoryOffline = async (storyId: string) => {
     const st = stories.find((s) => s.id === storyId);
-    if (!st || !user || !isOnline) {
+    if (!st || !user || !user.emailVerified || !isOnline) {
       if (!isOnline) toast('Cần kết nối mạng để tải truyện về máy.');
       return;
     }
@@ -1052,7 +1062,7 @@ export default function App() {
 
   const handleDownloadSingleChapter = async (storyId: string, chapterIdx: number) => {
     const st = stories.find((s) => s.id === storyId);
-    if (!st || !user || !isOnline) return;
+    if (!st || !user || !user.emailVerified || !isOnline) return;
     const target = st.chapters[chapterIdx];
     if (!target) return;
     const ch = await downloadChapterFromCloud(user.uid, st.id, target.id);
@@ -1099,7 +1109,7 @@ export default function App() {
       updatedAt: now,
     };
     await putPlaylist(pl);
-    if (user && isOnline) {
+    if (user && user.emailVerified && isOnline) {
       try {
         await ensureUserProfile(user, { theme, speechRate: rate, preferredVoice: selectedVoiceName });
         await pushPlaylistToCloud(user.uid, pl);
@@ -1111,7 +1121,7 @@ export default function App() {
           createdAt: Date.now(),
         });
       }
-    } else if (user) {
+    } else if (user && user.emailVerified) {
       await enqueueSync({
         id: `pl_${pl.id}`,
         kind: 'playlist',
@@ -1125,7 +1135,7 @@ export default function App() {
 
   const handleUpdatePlaylist = async (pl: Playlist) => {
     await putPlaylist(pl);
-    if (user && isOnline) {
+    if (user && user.emailVerified && isOnline) {
       try {
         await pushPlaylistToCloud(user.uid, pl);
       } catch {
@@ -1136,7 +1146,7 @@ export default function App() {
           createdAt: Date.now(),
         });
       }
-    } else if (user) {
+    } else if (user && user.emailVerified) {
       await enqueueSync({
         id: `pl_${pl.id}`,
         kind: 'playlist',
@@ -1149,7 +1159,7 @@ export default function App() {
 
   const handleDeletePlaylist = async (playlistId: string) => {
     await deletePlaylistLocal(playlistId);
-    if (user && isOnline) {
+    if (user && user.emailVerified && isOnline) {
       try {
         await deletePlaylistFromCloud(user.uid, playlistId);
       } catch {
@@ -1160,7 +1170,7 @@ export default function App() {
           createdAt: Date.now(),
         });
       }
-    } else if (user) {
+    } else if (user && user.emailVerified) {
       await enqueueSync({
         id: `del_pl_${playlistId}`,
         kind: 'delete_playlist',
@@ -1174,7 +1184,7 @@ export default function App() {
 
   const handleDownloadPlaylistOffline = async (playlistId: string) => {
     const pl = playlists.find((p) => p.id === playlistId);
-    if (!pl || !user || !isOnline) return;
+    if (!pl || !user || !user.emailVerified || !isOnline) return;
     setDownloadingPlaylistId(playlistId);
     let count = 0;
     try {
@@ -1532,16 +1542,92 @@ export default function App() {
                   localStorage.setItem('truyen_audio_device', name);
                 } catch {}
               }}
-              onSignIn={async () => {
+              onSignInGoogle={async () => {
                 try {
                   await signInWithPopup(auth, googleProvider);
-                  toast('Đăng nhập thành công');
+                  toast('Đăng nhập Google thành công');
                 } catch (err) {
                   toast(
                     err instanceof Error
                       ? `Không đăng nhập được: ${err.message}`
                       : 'Đăng nhập bị hủy'
                   );
+                }
+              }}
+              onSignInEmail={async (email, password) => {
+                try {
+                  const cred = await signInWithEmailAndPassword(auth, email, password);
+                  if (cred.user.emailVerified) {
+                    toast('Đăng nhập thành công');
+                  } else {
+                    toast('Hãy xác minh email để bật đồng bộ đám mây');
+                  }
+                } catch (err: unknown) {
+                  const code = (err as { code?: string })?.code || '';
+                  if (code === 'auth/operation-not-allowed') {
+                    throw new Error('Chưa bật phương thức Email/Mật khẩu trong Firebase Console.');
+                  }
+                  if (code === 'auth/invalid-credential' || code === 'auth/wrong-password' || code === 'auth/user-not-found') {
+                    throw new Error('Email hoặc mật khẩu không đúng.');
+                  }
+                  if (code === 'auth/too-many-requests') {
+                    throw new Error('Thử sai quá nhiều lần, vui lòng đợi vài phút.');
+                  }
+                  throw new Error(err instanceof Error ? err.message : 'Đăng nhập thất bại.');
+                }
+              }}
+              onRegisterEmail={async (email, password) => {
+                try {
+                  const cred = await createUserWithEmailAndPassword(auth, email, password);
+                  await sendEmailVerification(cred.user);
+                  toast('Đã tạo tài khoản! Kiểm tra hộp thư để xác minh email.');
+                } catch (err: unknown) {
+                  const code = (err as { code?: string })?.code || '';
+                  if (code === 'auth/operation-not-allowed') {
+                    throw new Error('Chưa bật phương thức Email/Mật khẩu trong Firebase Console.');
+                  }
+                  if (code === 'auth/email-already-in-use') {
+                    throw new Error('Email này đã được đăng ký, hãy chuyển sang tab Đăng nhập.');
+                  }
+                  if (code === 'auth/weak-password') {
+                    throw new Error('Mật khẩu cần tối thiểu 6 ký tự.');
+                  }
+                  throw new Error(err instanceof Error ? err.message : 'Đăng ký thất bại.');
+                }
+              }}
+              onResetPassword={async (email) => {
+                try {
+                  await sendPasswordResetEmail(auth, email);
+                  toast('Đã gửi email đặt lại mật khẩu');
+                } catch (err: unknown) {
+                  const code = (err as { code?: string })?.code || '';
+                  if (code === 'auth/user-not-found') {
+                    throw new Error('Không tìm thấy tài khoản với email này.');
+                  }
+                  throw new Error(err instanceof Error ? err.message : 'Không gửi được email.');
+                }
+              }}
+              onResendVerification={async () => {
+                if (!auth.currentUser) return;
+                try {
+                  await sendEmailVerification(auth.currentUser);
+                  toast('Đã gửi lại email xác minh');
+                } catch {
+                  toast('Vui lòng đợi một lát trước khi gửi lại email.');
+                }
+              }}
+              onReloadVerification={async () => {
+                if (!auth.currentUser) return;
+                await auth.currentUser.reload();
+                await auth.currentUser.getIdToken(true);
+                const refreshed = auth.currentUser;
+                setUser(refreshed);
+                setAuthTick((n) => n + 1);
+                if (refreshed?.emailVerified) {
+                  toast('Email đã xác minh! Đang đồng bộ dữ liệu…');
+                  await handleSyncNow(refreshed);
+                } else {
+                  toast('Email vẫn chưa được xác minh. Hãy bấm link trong hộp thư của bạn.');
                 }
               }}
               onSignOut={async () => {
