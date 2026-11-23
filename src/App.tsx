@@ -84,6 +84,8 @@ import {
 import {
   EQ_PRESETS,
   OFFLINE_VOICE_PROFILES,
+  PLAYLIST_WHOLE_STORY_MARKER,
+  isWholeStoryPlaylistItem,
   type AmbientMode,
   type ChapterContent,
   type ChapterSummary,
@@ -136,10 +138,7 @@ export default function App() {
   const [downloadingStoryId, setDownloadingStoryId] = useState<string | null>(null);
   const [downloadProgressText, setDownloadProgressText] = useState('');
   const [downloadingPlaylistId, setDownloadingPlaylistId] = useState<string | null>(null);
-  const [playlistModalTarget, setPlaylistModalTarget] = useState<{
-    story: Story;
-    chapterIndex?: number;
-  } | null>(null);
+  const [playlistModalTarget, setPlaylistModalTarget] = useState<Story | null>(null);
   const [confirmState, setConfirmState] = useState<{
     message: string;
     confirmLabel: string;
@@ -199,6 +198,13 @@ export default function App() {
       return true;
     }
   });
+  const [blueLightFilter, setBlueLightFilter] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('truyen_audio_blue_light') === 'true';
+    } catch {
+      return false;
+    }
+  });
   const [eqState, setEqState] = useState<EqState>(() => loadSavedEqState());
 
   // Native <audio> element state for imported mp3/wav/m4a chapters
@@ -210,6 +216,8 @@ export default function App() {
   // Mutable refs for stale-closure-free SpeechSynthesis & MediaSession callbacks
   const speechTokenRef = useRef(0);
   const watchdogRef = useRef<number | null>(null);
+  const speakDelayRef = useRef<number | null>(null);
+  const activeUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
   const sleepTimerRef = useRef<number | null>(null);
   const toastTimerRef = useRef<number | null>(null);
   const playingRef = useRef(isPlaying);
@@ -301,8 +309,12 @@ export default function App() {
       });
     };
     loadVoices();
+    const retryT1 = window.setTimeout(loadVoices, 350);
+    const retryT2 = window.setTimeout(loadVoices, 1200);
     window.speechSynthesis.onvoiceschanged = loadVoices;
     return () => {
+      window.clearTimeout(retryT1);
+      window.clearTimeout(retryT2);
       window.speechSynthesis.onvoiceschanged = null;
     };
   }, []);
@@ -376,6 +388,11 @@ export default function App() {
     (syncCloud = true) => {
       speechTokenRef.current++;
       clearWatchdog();
+      if (speakDelayRef.current) {
+        window.clearTimeout(speakDelayRef.current);
+        speakDelayRef.current = null;
+      }
+      activeUtteranceRef.current = null;
       if ('speechSynthesis' in window) {
         window.speechSynthesis.cancel();
       }
@@ -435,7 +452,24 @@ export default function App() {
       if (ctx.mode === 'playlist' && ctx.playlistId) {
         const pl = playlistsRef.current.find((p) => p.id === ctx.playlistId);
         if (pl && pl.items.length > 0) {
-          let nextIdx = (ctx.playlistIndex ?? 0) + direction;
+          const curIdx = Math.min(Math.max(0, ctx.playlistIndex ?? 0), pl.items.length - 1);
+          const currentItem = pl.items[curIdx];
+          if (currentItem && isWholeStoryPlaylistItem(currentItem)) {
+            const curStory = storiesRef.current.find((s) => s.id === currentItem.storyId);
+            if (curStory && curStory.chapters.length > 0) {
+              const sameStoryNextCh = activeChapterIdxRef.current + direction;
+              if (sameStoryNextCh >= 0 && sameStoryNextCh < curStory.chapters.length) {
+                await openChapterRef.current(curStory.id, sameStoryNextCh, true, {
+                  mode: 'playlist',
+                  playlistId: pl.id,
+                  playlistIndex: curIdx,
+                });
+                return;
+              }
+            }
+          }
+
+          let nextIdx = curIdx + direction;
           if (direction === 1 && shuffleEnabled && pl.items.length > 1) {
             nextIdx = Math.floor(Math.random() * pl.items.length);
           } else if (nextIdx >= pl.items.length) {
@@ -448,7 +482,14 @@ export default function App() {
             nextIdx = repeatEnabled ? pl.items.length - 1 : 0;
           }
           const item = pl.items[nextIdx];
-          await openChapterRef.current(item.storyId, item.chapterIndex, true, {
+          const targetStory = storiesRef.current.find((s) => s.id === item.storyId);
+          const targetChapterIdx =
+            isWholeStoryPlaylistItem(item)
+              ? direction === -1 && targetStory && targetStory.chapters.length > 0
+                ? targetStory.chapters.length - 1
+                : 0
+              : item.chapterIndex;
+          await openChapterRef.current(item.storyId, targetChapterIdx, true, {
             mode: 'playlist',
             playlistId: pl.id,
             playlistIndex: nextIdx,
@@ -470,6 +511,54 @@ export default function App() {
     [pausePlayback, repeatEnabled, shuffleEnabled]
   );
 
+  const resolveVietnameseUtteranceSettings = useCallback(() => {
+    const profile =
+      OFFLINE_VOICE_PROFILES.find((p) => p.id === voiceProfileRef.current) ||
+      OFFLINE_VOICE_PROFILES[0];
+
+    const liveList =
+      'speechSynthesis' in window
+        ? window.speechSynthesis
+            .getVoices()
+            .filter((v) => /^vi/i.test(v.lang) || /viet/i.test(v.name))
+        : [];
+    const available = voicesRef.current.length > 0 ? voicesRef.current : liveList;
+    const offlinePool = available.filter((v) => v.localService);
+    const pool = !isOnlineRef.current && offlinePool.length > 0 ? offlinePool : available;
+
+    let chosen = selectedVoiceRef.current
+      ? available.find((v) => v.name === selectedVoiceRef.current)
+      : undefined;
+
+    if (chosen && !isOnlineRef.current && !chosen.localService && offlinePool.length > 0) {
+      chosen = undefined;
+    }
+
+    if (!chosen && pool.length > 0) {
+      if (profile.preferredGender === 'female') {
+        chosen = pool.find((v) =>
+          /hoaimy|hoài my|linh|chi|my\b|nu\b|nữ|female|woman|mai\b|lan\b|huong|ngoc|trang|thao/i.test(
+            v.name
+          )
+        );
+      } else if (profile.preferredGender === 'male') {
+        chosen = pool.find((v) =>
+          /namminh|nam minh|nam\b|minh\b|male|man\b|hung|hùng|tuan|tuấn|duy\b|hoang|phong/i.test(
+            v.name
+          )
+        );
+      }
+      if (!chosen) chosen = pool[0];
+    }
+
+    const effectiveRate = Math.min(
+      2.5,
+      Math.max(0.5, Number((rateRef.current * profile.rateScale).toFixed(2)))
+    );
+
+    return { profile, chosen, effectiveRate };
+  }, []);
+
   const speakCurrentChunk = useCallback(
     (startIndex: number) => {
       if (!('speechSynthesis' in window)) {
@@ -489,6 +578,10 @@ export default function App() {
 
       const token = ++speechTokenRef.current;
       clearWatchdog();
+      if (speakDelayRef.current) {
+        window.clearTimeout(speakDelayRef.current);
+        speakDelayRef.current = null;
+      }
       window.speechSynthesis.cancel();
 
       setChunkIndex(startIndex);
@@ -496,38 +589,9 @@ export default function App() {
 
       const chunkText = list[startIndex].t;
       const utterance = new SpeechSynthesisUtterance(chunkText);
-      const profile =
-        OFFLINE_VOICE_PROFILES.find((p) => p.id === voiceProfileRef.current) ||
-        OFFLINE_VOICE_PROFILES[0];
+      activeUtteranceRef.current = utterance;
 
-      const offlinePool = voicesRef.current.filter((v) => v.localService);
-      const pool =
-        !isOnlineRef.current && offlinePool.length > 0 ? offlinePool : voicesRef.current;
-
-      let chosen = selectedVoiceRef.current
-        ? voicesRef.current.find((v) => v.name === selectedVoiceRef.current)
-        : undefined;
-
-      if (chosen && !isOnlineRef.current && !chosen.localService && offlinePool.length > 0) {
-        chosen = undefined;
-      }
-
-      if (!chosen && pool.length > 0) {
-        if (profile.preferredGender === 'female') {
-          chosen = pool.find((v) =>
-            /hoaimy|hoài my|linh|chi|my\b|nu\b|nữ|female|woman|mai\b|lan\b|huong|ngoc|trang|thao/i.test(
-              v.name
-            )
-          );
-        } else if (profile.preferredGender === 'male') {
-          chosen = pool.find((v) =>
-            /namminh|nam minh|nam\b|minh\b|male|man\b|hung|hùng|tuan|tuấn|duy\b|hoang|phong/i.test(
-              v.name
-            )
-          );
-        }
-        if (!chosen) chosen = pool[0];
-      }
+      const { profile, chosen, effectiveRate } = resolveVietnameseUtteranceSettings();
 
       if (chosen) {
         utterance.voice = chosen;
@@ -536,10 +600,6 @@ export default function App() {
         utterance.lang = 'vi-VN';
       }
 
-      const effectiveRate = Math.min(
-        2.5,
-        Math.max(0.5, Number((rateRef.current * profile.rateScale).toFixed(2)))
-      );
       utterance.pitch = profile.pitch;
       utterance.rate = effectiveRate;
 
@@ -583,14 +643,60 @@ export default function App() {
         }
       }, approxMs);
 
-      window.setTimeout(() => {
+      speakDelayRef.current = window.setTimeout(() => {
+        speakDelayRef.current = null;
         if (token === speechTokenRef.current && playingRef.current) {
+          if (window.speechSynthesis.paused) {
+            window.speechSynthesis.resume();
+          }
           window.speechSynthesis.speak(utterance);
         }
-      }, 35);
+      }, 90);
     },
-    [handleAdvanceChapter, saveProgress, toast]
+    [handleAdvanceChapter, resolveVietnameseUtteranceSettings, saveProgress, toast]
   );
+
+  const previewCurrentVoice = useCallback(() => {
+    if (!('speechSynthesis' in window)) {
+      toast('Trình duyệt này chưa hỗ trợ đọc giọng nói.');
+      return;
+    }
+    if (playingRef.current) {
+      speakCurrentChunk(chunkIndexRef.current);
+      return;
+    }
+    const token = ++speechTokenRef.current;
+    clearWatchdog();
+    if (speakDelayRef.current) {
+      window.clearTimeout(speakDelayRef.current);
+      speakDelayRef.current = null;
+    }
+    window.speechSynthesis.cancel();
+
+    const { profile, chosen, effectiveRate } = resolveVietnameseUtteranceSettings();
+    const sample = new SpeechSynthesisUtterance(
+      `Xin chào, đây là giọng ${profile.label.replace(/\s*\(.*?\)\s*/g, '')}.`
+    );
+    activeUtteranceRef.current = sample;
+    if (chosen) {
+      sample.voice = chosen;
+      sample.lang = chosen.lang;
+    } else {
+      sample.lang = 'vi-VN';
+    }
+    sample.pitch = profile.pitch;
+    sample.rate = effectiveRate;
+
+    speakDelayRef.current = window.setTimeout(() => {
+      speakDelayRef.current = null;
+      if (token === speechTokenRef.current && !playingRef.current) {
+        if (window.speechSynthesis.paused) {
+          window.speechSynthesis.resume();
+        }
+        window.speechSynthesis.speak(sample);
+      }
+    }, 90);
+  }, [resolveVietnameseUtteranceSettings, speakCurrentChunk, toast]);
 
   const startPlayback = useCallback(async () => {
     if (!activeChapterContent) return;
@@ -1520,21 +1626,44 @@ export default function App() {
     try {
       for (const item of pl.items) {
         const st = storiesRef.current.find((s) => s.id === item.storyId);
-        const chSum = st?.chapters[item.chapterIndex];
-        if (st && chSum && !chSum.downloadedOffline) {
-          const ch = await downloadChapterFromCloud(user.uid, st.id, chSum.id);
-          if (ch) {
-            const updated: Story = {
-              ...st,
-              cloudOnly: false,
-              chapters: st.chapters.map((c, idx) =>
-                idx === item.chapterIndex
-                  ? { ...c, downloadedOffline: true, sizeBytes: ch.sizeBytes }
-                  : c
-              ),
-            };
-            await putStory(updated);
-            count++;
+        if (!st) continue;
+        if (isWholeStoryPlaylistItem(item)) {
+          const updatedChapters = [...st.chapters];
+          let changed = false;
+          for (let i = 0; i < updatedChapters.length; i++) {
+            if (!updatedChapters[i].downloadedOffline) {
+              const ch = await downloadChapterFromCloud(user.uid, st.id, updatedChapters[i].id);
+              if (ch) {
+                updatedChapters[i] = {
+                  ...updatedChapters[i],
+                  downloadedOffline: true,
+                  sizeBytes: ch.sizeBytes,
+                };
+                changed = true;
+                count++;
+              }
+            }
+          }
+          if (changed) {
+            await putStory({ ...st, cloudOnly: false, chapters: updatedChapters });
+          }
+        } else {
+          const chSum = st.chapters[item.chapterIndex];
+          if (chSum && !chSum.downloadedOffline) {
+            const ch = await downloadChapterFromCloud(user.uid, st.id, chSum.id);
+            if (ch) {
+              const updated: Story = {
+                ...st,
+                cloudOnly: false,
+                chapters: st.chapters.map((c, idx) =>
+                  idx === item.chapterIndex
+                    ? { ...c, downloadedOffline: true, sizeBytes: ch.sizeBytes }
+                    : c
+                ),
+              };
+              await putStory(updated);
+              count++;
+            }
           }
         }
       }
@@ -1695,6 +1824,7 @@ export default function App() {
               ambientMode={ambientMode}
               wakeLockEnabled={wakeLockEnabled}
               autoPlayNext={autoPlayNext}
+              blueLightFilter={blueLightFilter}
               playlistLabel={activePlaylistLabel}
               onBack={() => setIsReaderOpen(false)}
               onTogglePlay={() => (isPlaying ? pausePlayback(true) : startPlayback())}
@@ -1728,18 +1858,30 @@ export default function App() {
                 try {
                   localStorage.setItem('truyen_audio_voice', name);
                 } catch {}
-                if (isPlaying) speakCurrentChunk(chunkIndexRef.current);
+                if (isPlaying && !activeChapterContent.audioBlob) {
+                  speakCurrentChunk(chunkIndexRef.current);
+                } else {
+                  toast('Đã chọn giọng thiết bị mới');
+                }
               }}
               onChangeVoiceProfile={(id) => {
                 setVoiceProfileId(id);
                 voiceProfileRef.current = id;
+                // Unlock automatic Vietnamese gender matching when switching AI profile
+                setSelectedVoiceName('');
+                selectedVoiceRef.current = '';
                 try {
                   localStorage.setItem('truyen_audio_voice_profile', id);
+                  localStorage.setItem('truyen_audio_voice', '');
                 } catch {}
                 if (isPlaying && !activeChapterContent.audioBlob) {
                   speakCurrentChunk(chunkIndexRef.current);
+                } else {
+                  const prof = OFFLINE_VOICE_PROFILES.find((p) => p.id === id);
+                  if (prof) toast(`Đã chọn giọng: ${prof.label}`);
                 }
               }}
+              onPreviewVoice={previewCurrentVoice}
               onSelectEqPreset={(presetId) => {
                 const found = EQ_PRESETS.find((p) => p.id === presetId);
                 if (!found) return;
@@ -1827,6 +1969,20 @@ export default function App() {
                   return next;
                 });
               }}
+              onToggleBlueLightFilter={() => {
+                setBlueLightFilter((prev) => {
+                  const next = !prev;
+                  try {
+                    localStorage.setItem('truyen_audio_blue_light', String(next));
+                  } catch {}
+                  toast(
+                    next
+                      ? 'Đã bật chế độ lọc ánh sáng xanh'
+                      : 'Đã tắt chế độ lọc ánh sáng xanh'
+                  );
+                  return next;
+                });
+              }}
             />
           ) : tab === 'library' && selectedStory ? (
             <StoryDetailView
@@ -1864,9 +2020,7 @@ export default function App() {
               onRemoveChapterOffline={(chIdx) =>
                 handleRemoveChapterOffline(selectedStory.id, chIdx)
               }
-              onOpenAddToPlaylist={(chIdx) =>
-                setPlaylistModalTarget({ story: selectedStory, chapterIndex: chIdx })
-              }
+              onOpenAddToPlaylist={() => setPlaylistModalTarget(selectedStory)}
             />
           ) : tab === 'library' ? (
             <LibraryView
@@ -1881,12 +2035,15 @@ export default function App() {
               onCreateStory={handleCreateStory}
               onDeleteStory={handleDeleteStory}
               onDownloadStoryOffline={handleDownloadStoryOffline}
+              onOpenAddToPlaylist={(st) => setPlaylistModalTarget(st)}
               downloadingStoryId={downloadingStoryId}
             />
           ) : tab === 'playlists' ? (
             <PlaylistsView
               playlists={playlists}
               stories={stories}
+              progressMap={progressMap}
+              activeStoryId={activeStoryId}
               isOnline={isOnline}
               shuffleEnabled={shuffleEnabled}
               repeatEnabled={repeatEnabled}
@@ -1899,7 +2056,15 @@ export default function App() {
                 const pl = playlists.find((p) => p.id === plId);
                 const item = pl?.items[itemIdx];
                 if (item) {
-                  openChapter(item.storyId, item.chapterIndex, true, {
+                  const st = stories.find((s) => s.id === item.storyId);
+                  const prog = progressMap[item.storyId];
+                  const resumeCh =
+                    isWholeStoryPlaylistItem(item) && st && prog
+                      ? Math.min(Math.max(0, prog.chapterIndex), Math.max(0, st.chapters.length - 1))
+                      : isWholeStoryPlaylistItem(item)
+                        ? 0
+                        : item.chapterIndex;
+                  openChapter(item.storyId, resumeCh, true, {
                     mode: 'playlist',
                     playlistId: plId,
                     playlistIndex: itemIdx,
@@ -2149,35 +2314,34 @@ export default function App() {
       {/* Add to Playlist Modal */}
       {playlistModalTarget && (
         <AddToPlaylistModal
-          story={playlistModalTarget.story}
-          chapterIndex={playlistModalTarget.chapterIndex}
+          story={playlistModalTarget}
           playlists={playlists}
           onClose={() => setPlaylistModalTarget(null)}
-          onAddToPlaylist={async (plId, indices) => {
+          onAddStoryToPlaylist={async (plId, targetStory) => {
             const pl = playlists.find((p) => p.id === plId);
             if (!pl) return;
-            const newItems: PlaylistItem[] = indices.map((idx) => ({
-              storyId: playlistModalTarget.story.id,
-              chapterIndex: idx,
-              storyTitle: playlistModalTarget.story.title,
-              chapterTitle:
-                playlistModalTarget.story.chapters[idx]?.title || `Chương ${idx + 1}`,
-            }));
-            const merged = [...pl.items, ...newItems].slice(0, 200);
+            if (pl.items.some((it) => it.storyId === targetStory.id)) {
+              toast(`“${targetStory.title}” đã có trong “${pl.name}”`);
+              return;
+            }
+            const entry: PlaylistItem = {
+              storyId: targetStory.id,
+              chapterIndex: 0,
+              storyTitle: targetStory.title,
+              chapterTitle: PLAYLIST_WHOLE_STORY_MARKER,
+            };
+            const merged = [...pl.items, entry].slice(0, 200);
             await handleUpdatePlaylist({ ...pl, items: merged, updatedAt: Date.now() });
-            toast(`Đã thêm ${newItems.length} chương vào “${pl.name}”`);
+            toast(`Đã thêm truyện “${targetStory.title}” vào “${pl.name}”`);
           }}
-          onCreatePlaylistWithItems={async (name, indices) => {
-            const newItems: PlaylistItem[] = indices
-              .slice(0, 200)
-              .map((idx) => ({
-                storyId: playlistModalTarget.story.id,
-                chapterIndex: idx,
-                storyTitle: playlistModalTarget.story.title,
-                chapterTitle:
-                  playlistModalTarget.story.chapters[idx]?.title || `Chương ${idx + 1}`,
-              }));
-            await handleCreatePlaylist(name, '', newItems);
+          onCreatePlaylistWithStory={async (name, targetStory) => {
+            const entry: PlaylistItem = {
+              storyId: targetStory.id,
+              chapterIndex: 0,
+              storyTitle: targetStory.title,
+              chapterTitle: PLAYLIST_WHOLE_STORY_MARKER,
+            };
+            await handleCreatePlaylist(name, '', [entry]);
           }}
         />
       )}
@@ -2216,6 +2380,14 @@ export default function App() {
         <div className="fixed left-1/2 -translate-x-1/2 top-[calc(4.25rem+env(safe-area-inset-top,0px))] md:top-6 z-50 max-w-[90vw] px-4 py-2.5 rounded-xl bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900 text-xs sm:text-sm font-medium shadow-lg text-center">
           {toastMsg}
         </div>
+      )}
+
+      {/* Night Amber Blue-Light Filter Overlay */}
+      {blueLightFilter && (
+        <div
+          aria-hidden="true"
+          className="fixed inset-0 z-[60] pointer-events-none bg-amber-400/20 dark:bg-amber-500/20 backdrop-sepia-[.25] transition-opacity duration-300"
+        />
       )}
     </div>
   );

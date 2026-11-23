@@ -48,7 +48,7 @@ interface Props {
   onDownloadAllOffline: () => Promise<void>;
   onDownloadSingleChapter: (chapterIndex: number) => Promise<void>;
   onRemoveChapterOffline: (chapterIndex: number) => Promise<void>;
-  onOpenAddToPlaylist: (chapterIndex?: number) => void;
+  onOpenAddToPlaylist: () => void;
 }
 
 const CUSTOM_GENRE_VALUE = '__custom__';
@@ -304,7 +304,7 @@ export const StoryDetailView: React.FC<Props> = ({
             )}
             {story.chapters.length > 0 && (
               <button
-                onClick={() => onOpenAddToPlaylist(undefined)}
+                onClick={onOpenAddToPlaylist}
                 className="min-h-[44px] px-3.5 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 text-xs sm:text-sm font-medium inline-flex items-center justify-center gap-2 hover:bg-slate-100 dark:hover:bg-slate-800 transition whitespace-nowrap shrink-0 cursor-pointer"
               >
                 <ListPlus className="w-4 h-4" />
@@ -505,7 +505,7 @@ export const StoryDetailView: React.FC<Props> = ({
                         </>
                       ) : (
                         <>
-                          {!ch.downloadedOffline ? (
+                          {!ch.downloadedOffline && (
                             <button
                               onClick={() => onDownloadSingleChapter(idx)}
                               disabled={!isOnline}
@@ -513,14 +513,6 @@ export const StoryDetailView: React.FC<Props> = ({
                               className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-lg text-blue-600 dark:text-blue-400 hover:bg-blue-500/10 disabled:opacity-40 cursor-pointer"
                             >
                               <Download className="w-4 h-4" />
-                            </button>
-                          ) : (
-                            <button
-                              onClick={() => onOpenAddToPlaylist(idx)}
-                              title="Thêm chương vào danh sách phát"
-                              className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-lg text-slate-500 hover:text-blue-500 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
-                            >
-                              <ListPlus className="w-4 h-4" />
                             </button>
                           )}
                           {ch.downloadedOffline && story.syncedAt && (

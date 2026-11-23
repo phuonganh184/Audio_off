@@ -4,6 +4,7 @@ import {
   AudioLines,
   ChevronDown,
   ChevronUp,
+  Eye,
   Lock,
   Pause,
   Play,
@@ -51,6 +52,7 @@ interface Props {
   ambientMode: AmbientMode;
   wakeLockEnabled: boolean;
   autoPlayNext: boolean;
+  blueLightFilter: boolean;
   playlistLabel?: string;
   onBack: () => void;
   onTogglePlay: () => void;
@@ -60,6 +62,7 @@ interface Props {
   onSeekAudioTime: (seconds: number) => void;
   onChangeVoice: (name: string) => void;
   onChangeVoiceProfile: (id: VoiceProfileId) => void;
+  onPreviewVoice: () => void;
   onSelectEqPreset: (presetId: Exclude<EqPresetId, 'custom'>) => void;
   onChangeEqBand: (bandIndex: number, db: number) => void;
   onChangeRate: (rate: number) => void;
@@ -67,6 +70,7 @@ interface Props {
   onChangeAmbient: (mode: AmbientMode) => void;
   onToggleWakeLock: () => void;
   onToggleAutoPlayNext: () => void;
+  onToggleBlueLightFilter: () => void;
 }
 
 const SPEED_PRESETS = [0.75, 0.9, 1, 1.15, 1.25, 1.5, 1.75, 2];
@@ -98,6 +102,7 @@ export const ReaderPlayerView: React.FC<Props> = ({
   ambientMode,
   wakeLockEnabled,
   autoPlayNext,
+  blueLightFilter,
   playlistLabel,
   onBack,
   onTogglePlay,
@@ -107,6 +112,7 @@ export const ReaderPlayerView: React.FC<Props> = ({
   onSeekAudioTime,
   onChangeVoice,
   onChangeVoiceProfile,
+  onPreviewVoice,
   onSelectEqPreset,
   onChangeEqBand,
   onChangeRate,
@@ -114,6 +120,7 @@ export const ReaderPlayerView: React.FC<Props> = ({
   onChangeAmbient,
   onToggleWakeLock,
   onToggleAutoPlayNext,
+  onToggleBlueLightFilter,
 }) => {
   const [fontSize, setFontSize] = useState<'sm' | 'md' | 'lg'>('md');
   const [drawerTab, setDrawerTab] = useState<'none' | 'settings' | 'eq'>('none');
@@ -163,20 +170,38 @@ export const ReaderPlayerView: React.FC<Props> = ({
           <span>Quay lại</span>
         </button>
 
-        <div className="flex items-center rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#1a1d24] p-0.5 shrink-0">
-          {(['sm', 'md', 'lg'] as const).map((sz, i) => (
-            <button
-              key={sz}
-              onClick={() => setFontSize(sz)}
-              className={`min-h-[34px] px-2.5 rounded-lg text-xs font-semibold cursor-pointer ${
-                fontSize === sz
-                  ? 'bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900'
-                  : 'text-slate-600 dark:text-slate-400'
-              }`}
-            >
-              {i === 0 ? 'A-' : i === 1 ? 'A' : 'A+'}
-            </button>
-          ))}
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={onToggleBlueLightFilter}
+            aria-pressed={blueLightFilter}
+            title="Chế độ lọc ánh sáng xanh (phủ hổ phách dịu mắt ban đêm)"
+            className={`min-h-[38px] px-2.5 sm:px-3 rounded-xl border text-xs font-semibold inline-flex items-center gap-1.5 transition cursor-pointer ${
+              blueLightFilter
+                ? 'bg-amber-500/18 border-amber-500/60 text-amber-800 dark:text-amber-300'
+                : 'bg-white dark:bg-[#1a1d24] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+            }`}
+          >
+            <Eye className="w-3.5 h-3.5 shrink-0" />
+            <span className="hidden sm:inline">Chế độ lọc ánh sáng xanh</span>
+            <span className="sm:hidden">Lọc mắt</span>
+          </button>
+
+          <div className="flex items-center rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#1a1d24] p-0.5 shrink-0">
+            {(['sm', 'md', 'lg'] as const).map((sz, i) => (
+              <button
+                key={sz}
+                onClick={() => setFontSize(sz)}
+                className={`min-h-[34px] px-2.5 rounded-lg text-xs font-semibold cursor-pointer ${
+                  fontSize === sz
+                    ? 'bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900'
+                    : 'text-slate-600 dark:text-slate-400'
+                }`}
+              >
+                {i === 0 ? 'A-' : i === 1 ? 'A' : 'A+'}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -370,9 +395,19 @@ export const ReaderPlayerView: React.FC<Props> = ({
                   </div>
 
                   <div>
-                    <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                      Giọng Tiếng Việt thiết bị
-                    </label>
+                    <div className="flex items-center justify-between gap-2 mb-1">
+                      <label className="block font-semibold text-slate-700 dark:text-slate-300">
+                        Giọng Tiếng Việt thiết bị
+                      </label>
+                      <button
+                        type="button"
+                        onClick={onPreviewVoice}
+                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-blue-500/12 text-blue-600 dark:text-blue-400 text-[11px] font-semibold hover:bg-blue-500/20 cursor-pointer"
+                      >
+                        <Volume2 className="w-3 h-3" />
+                        <span>Nghe thử</span>
+                      </button>
+                    </div>
                     <div className="relative">
                       <select
                         value={selectedVoiceName}
@@ -394,6 +429,11 @@ export const ReaderPlayerView: React.FC<Props> = ({
                       </select>
                       <ChevronDown className="w-4 h-4 text-slate-400 absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
                     </div>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
+                      {voices.length <= 1 && (!voices[0] || !voices[0].localService)
+                        ? 'Trình duyệt hiện chỉ có 1 giọng Tiếng Việt trực tuyến (giọng này chỉ đổi được tốc độ, chưa hỗ trợ đổi cao độ trầm/bổng). Dùng Edge hoặc bật gói giọng Việt trên Windows/Android để nghe rõ các giọng AI.'
+                        : `Có ${voices.length} giọng Tiếng Việt trên thiết bị.`}
+                    </p>
                   </div>
                 </>
               )}
@@ -473,6 +513,33 @@ export const ReaderPlayerView: React.FC<Props> = ({
                   }`}
                 >
                   {autoPlayNext ? 'Đang bật' : 'Tắt'}
+                </button>
+              </div>
+
+              <div className="sm:col-span-2 flex items-center justify-between gap-3 rounded-xl bg-slate-50 dark:bg-[#111318] border border-slate-200 dark:border-slate-800 px-3.5 py-2.5">
+                <div className="flex items-center gap-2 text-slate-700 dark:text-slate-300 min-w-0">
+                  <Eye className="w-4 h-4 text-amber-500 shrink-0" />
+                  <div className="min-w-0">
+                    <div className="font-medium text-slate-800 dark:text-slate-200">
+                      Chế độ lọc ánh sáng xanh
+                    </div>
+                    <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                      Phủ lớp màu hổ phách dịu mắt khi nghe vào buổi tối
+                    </div>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={blueLightFilter}
+                  onClick={onToggleBlueLightFilter}
+                  className={`min-h-[32px] px-3 rounded-lg font-semibold shrink-0 cursor-pointer transition-colors ${
+                    blueLightFilter
+                      ? 'bg-amber-600 text-white'
+                      : 'bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
+                  }`}
+                >
+                  {blueLightFilter ? 'Đang bật' : 'Tắt'}
                 </button>
               </div>
 

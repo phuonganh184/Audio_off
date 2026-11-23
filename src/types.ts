@@ -213,6 +213,12 @@ export interface PlaylistItem {
   chapterTitle: string;
 }
 
+export const PLAYLIST_WHOLE_STORY_MARKER = 'Toàn bộ tập truyện';
+
+export function isWholeStoryPlaylistItem(item: PlaylistItem): boolean {
+  return item.chapterTitle === PLAYLIST_WHOLE_STORY_MARKER;
+}
+
 export interface Playlist {
   id: string;
   name: string;

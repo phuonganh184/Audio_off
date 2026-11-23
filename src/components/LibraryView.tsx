@@ -5,6 +5,7 @@ import {
   Cloud,
   Download,
   Headphones,
+  ListPlus,
   Play,
   Plus,
   Search,
@@ -63,6 +64,7 @@ interface Props {
   onCreateStory: (title: string, author: string, genre: string, coverFile?: File) => Promise<void>;
   onDeleteStory: (storyId: string) => void;
   onDownloadStoryOffline: (storyId: string) => Promise<void>;
+  onOpenAddToPlaylist: (story: Story) => void;
   downloadingStoryId: string | null;
 }
 
@@ -77,6 +79,7 @@ export const LibraryView: React.FC<Props> = ({
   onCreateStory,
   onDeleteStory,
   onDownloadStoryOffline,
+  onOpenAddToPlaylist,
   downloadingStoryId,
 }) => {
   const [search, setSearch] = useState('');
@@ -610,16 +613,30 @@ export const LibraryView: React.FC<Props> = ({
                         {totalCh > 0 ? 'Mở nghe ngay' : 'Thêm chương'}
                       </span>
                     )}
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onDeleteStory(s.id);
-                      }}
-                      aria-label={`Xóa ${s.title}`}
-                      className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-500/10 transition-colors cursor-pointer"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onOpenAddToPlaylist(s);
+                        }}
+                        title="Thêm truyện vào danh sách phát"
+                        aria-label={`Thêm ${s.title} vào danh sách phát`}
+                        className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-lg text-slate-400 hover:text-blue-600 hover:bg-blue-500/10 transition-colors cursor-pointer"
+                      >
+                        <ListPlus className="w-4 h-4" />
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onDeleteStory(s.id);
+                        }}
+                        aria-label={`Xóa ${s.title}`}
+                        className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-500/10 transition-colors cursor-pointer"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>
