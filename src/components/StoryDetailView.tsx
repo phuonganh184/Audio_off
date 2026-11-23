@@ -26,6 +26,8 @@ import { STORY_GENRES, type ListeningProgress, type Story } from '@/src/types';
 
 interface Props {
   story: Story;
+  allStories: Story[];
+  progressMap: Record<string, ListeningProgress>;
   progress?: ListeningProgress;
   activeChapterIndex: number | null;
   isPlaying: boolean;
@@ -33,6 +35,7 @@ interface Props {
   isDownloadingAll: boolean;
   downloadProgressText: string;
   onBack: () => void;
+  onOpenStory: (storyId: string) => void;
   onPlayChapter: (chapterIndex: number) => void;
   onAddChapters: (files: FileList) => Promise<void>;
   onUpdateCover: (file: File) => Promise<void>;
@@ -52,6 +55,8 @@ const CUSTOM_GENRE_VALUE = '__custom__';
 
 export const StoryDetailView: React.FC<Props> = ({
   story,
+  allStories,
+  progressMap,
   progress,
   activeChapterIndex,
   isPlaying,
@@ -59,6 +64,7 @@ export const StoryDetailView: React.FC<Props> = ({
   isDownloadingAll,
   downloadProgressText,
   onBack,
+  onOpenStory,
   onPlayChapter,
   onAddChapters,
   onUpdateCover,
@@ -142,6 +148,18 @@ export const StoryDetailView: React.FC<Props> = ({
   const resumeIndex = progress
     ? Math.min(progress.chapterIndex, Math.max(0, story.chapters.length - 1))
     : 0;
+
+  const currentGenre = story.genre?.trim() || '';
+  const sameGenreStories = currentGenre
+    ? allStories
+        .filter(
+          (s) =>
+            s.id !== story.id &&
+            (s.genre?.trim() || '').toLowerCase() === currentGenre.toLowerCase()
+        )
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+        .slice(0, 6)
+    : [];
 
   return (
     <div className="space-y-6">
@@ -546,6 +564,100 @@ export const StoryDetailView: React.FC<Props> = ({
           </div>
         )}
       </div>
+
+      {/* Related Stories by Genre */}
+      <section aria-label="Truyện cùng thể loại" className="space-y-3 pt-2">
+        <div className="flex items-center justify-between gap-2 px-1">
+          <div className="flex items-center gap-2 flex-wrap">
+            <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100">
+              Truyện cùng thể loại
+            </h3>
+            {currentGenre && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-blue-500/10 text-blue-700 dark:text-blue-300 text-xs font-medium">
+                <Tag className="w-3 h-3" />
+                <span>{currentGenre}</span>
+              </span>
+            )}
+          </div>
+          {sameGenreStories.length > 0 && (
+            <span className="text-xs text-slate-500 dark:text-slate-400 tabular-nums">
+              {sameGenreStories.length} truyện
+            </span>
+          )}
+        </div>
+
+        {!currentGenre ? (
+          <div className="rounded-2xl bg-white dark:bg-[#1a1d24] border border-slate-200 dark:border-slate-800 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400">
+              Truyện này chưa được phân loại thể loại. Hãy gắn thể loại để xem gợi ý truyện tương tự.
+            </p>
+            <button
+              type="button"
+              onClick={openGenreEditor}
+              className="min-h-[38px] px-3.5 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold text-blue-600 dark:text-blue-400 hover:bg-blue-500/10 shrink-0 self-start sm:self-auto cursor-pointer"
+            >
+              Chọn thể loại
+            </button>
+          </div>
+        ) : sameGenreStories.length === 0 ? (
+          <div className="rounded-2xl bg-white dark:bg-[#1a1d24] border border-slate-200 dark:border-slate-800 p-4 text-xs sm:text-sm text-slate-600 dark:text-slate-400">
+            Chưa có truyện nào khác thuộc thể loại “{currentGenre}” trong thư viện của bạn.
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {sameGenreStories.map((rel) => {
+              const relTotalCh = rel.chapters.length;
+              const relOfflineCh = rel.chapters.filter((c) => c.downloadedOffline).length;
+              const relProg = progressMap[rel.id];
+              const relChapterNum = relProg
+                ? Math.min(relProg.chapterIndex + 1, Math.max(1, relTotalCh))
+                : 0;
+              return (
+                <div
+                  key={rel.id}
+                  onClick={() => onOpenStory(rel.id)}
+                  className="rounded-2xl bg-white dark:bg-[#1a1d24] border border-slate-200 dark:border-slate-800 p-3.5 flex items-center gap-3 hover:border-blue-500/60 transition-colors cursor-pointer"
+                >
+                  <StoryCover
+                    title={rel.title}
+                    cover={rel.cover}
+                    className="w-14 h-20 rounded-xl shrink-0"
+                  />
+                  <div className="min-w-0 flex-1">
+                    <h4 className="text-sm font-semibold text-slate-900 dark:text-slate-100 line-clamp-2 leading-snug">
+                      {rel.title}
+                    </h4>
+                    {rel.author && (
+                      <p className="text-xs text-slate-500 dark:text-slate-400 truncate mt-0.5">
+                        {rel.author}
+                      </p>
+                    )}
+                    <div className="mt-1.5 text-xs text-slate-600 dark:text-slate-400 tabular-nums flex items-center gap-1.5 flex-wrap">
+                      <span>{relTotalCh} chương</span>
+                      {relOfflineCh > 0 && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span className="text-emerald-700 dark:text-emerald-400 font-medium">
+                            {relOfflineCh === relTotalCh ? 'Offline' : `${relOfflineCh}/${relTotalCh}`}
+                          </span>
+                        </>
+                      )}
+                      {relProg && relTotalCh > 0 && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span className="text-blue-600 dark:text-blue-400 font-medium">
+                            Ch. {relChapterNum}
+                          </span>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </section>
 
       <input
         ref={fileInputRef}

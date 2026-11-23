@@ -104,6 +104,10 @@ class BackgroundAudioKeepAlive {
     }
   }
 
+  public getAudioElement(): HTMLAudioElement | null {
+    return this.audioEl;
+  }
+
   public async setWakeLock(enabled: boolean): Promise<boolean> {
     if (typeof navigator === 'undefined' || !('wakeLock' in navigator)) return false;
     if (!enabled) {

@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft,
+  AudioLines,
   ChevronDown,
   ChevronUp,
   Lock,
@@ -11,12 +12,24 @@ import {
   SkipBack,
   SkipForward,
   SlidersHorizontal,
+  Sparkles,
   Sun,
   Timer,
   Volume2,
 } from 'lucide-react';
 import { StoryCover } from '@/src/components/StoryCover';
-import type { AmbientMode, ChapterContent, Story, TextChunk } from '@/src/types';
+import type { EqGains } from '@/src/lib/audioEqualizer';
+import {
+  EQ_BANDS,
+  EQ_PRESETS,
+  OFFLINE_VOICE_PROFILES,
+  type AmbientMode,
+  type ChapterContent,
+  type EqPresetId,
+  type Story,
+  type TextChunk,
+  type VoiceProfileId,
+} from '@/src/types';
 
 interface Props {
   story: Story;
@@ -30,10 +43,14 @@ interface Props {
   audioDuration: number;
   voices: SpeechSynthesisVoice[];
   selectedVoiceName: string;
+  voiceProfileId: VoiceProfileId;
+  eqPreset: EqPresetId;
+  eqGains: EqGains;
   rate: number;
   sleepMinutes: number;
   ambientMode: AmbientMode;
   wakeLockEnabled: boolean;
+  autoPlayNext: boolean;
   playlistLabel?: string;
   onBack: () => void;
   onTogglePlay: () => void;
@@ -42,10 +59,14 @@ interface Props {
   onSeekChunk: (index: number) => void;
   onSeekAudioTime: (seconds: number) => void;
   onChangeVoice: (name: string) => void;
+  onChangeVoiceProfile: (id: VoiceProfileId) => void;
+  onSelectEqPreset: (presetId: Exclude<EqPresetId, 'custom'>) => void;
+  onChangeEqBand: (bandIndex: number, db: number) => void;
   onChangeRate: (rate: number) => void;
   onChangeSleep: (minutes: number) => void;
   onChangeAmbient: (mode: AmbientMode) => void;
   onToggleWakeLock: () => void;
+  onToggleAutoPlayNext: () => void;
 }
 
 const SPEED_PRESETS = [0.75, 0.9, 1, 1.15, 1.25, 1.5, 1.75, 2];
@@ -69,10 +90,14 @@ export const ReaderPlayerView: React.FC<Props> = ({
   audioDuration,
   voices,
   selectedVoiceName,
+  voiceProfileId,
+  eqPreset,
+  eqGains,
   rate,
   sleepMinutes,
   ambientMode,
   wakeLockEnabled,
+  autoPlayNext,
   playlistLabel,
   onBack,
   onTogglePlay,
@@ -81,13 +106,17 @@ export const ReaderPlayerView: React.FC<Props> = ({
   onSeekChunk,
   onSeekAudioTime,
   onChangeVoice,
+  onChangeVoiceProfile,
+  onSelectEqPreset,
+  onChangeEqBand,
   onChangeRate,
   onChangeSleep,
   onChangeAmbient,
   onToggleWakeLock,
+  onToggleAutoPlayNext,
 }) => {
   const [fontSize, setFontSize] = useState<'sm' | 'md' | 'lg'>('md');
-  const [showAudioOpts, setShowAudioOpts] = useState(false);
+  const [drawerTab, setDrawerTab] = useState<'none' | 'settings' | 'eq'>('none');
   const activeSpanRef = useRef<HTMLSpanElement | null>(null);
 
   useEffect(() => {
@@ -216,33 +245,157 @@ export const ReaderPlayerView: React.FC<Props> = ({
         className="fixed bottom-0 left-0 right-0 md:left-64 z-30 pb-safe border-t border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-[#161920]/95 backdrop-blur-md shadow-[0_-8px_24px_rgba(0,0,0,0.08)] dark:shadow-[0_-8px_24px_rgba(0,0,0,0.35)]"
       >
         <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-2.5 sm:py-3 space-y-2">
-          {/* Expandable Settings Panel anchored at bottom */}
-          {showAudioOpts && (
+          {/* Expandable Bottom Drawer: Settings or Equalizer */}
+          {drawerTab === 'eq' && (
+            <div className="max-h-[48vh] overflow-y-auto pb-2.5 mb-1 border-b border-slate-200/80 dark:border-slate-800 space-y-3 text-xs">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <AudioLines className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                  <span className="font-semibold text-slate-900 dark:text-slate-100">
+                    Bộ chỉnh âm (Equalizer)
+                  </span>
+                  {eqPreset === 'custom' && (
+                    <span className="px-2 py-0.5 rounded-md bg-blue-500/12 text-blue-600 dark:text-blue-400 text-[11px] font-semibold">
+                      Tùy chỉnh
+                    </span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onSelectEqPreset('flat')}
+                  className="min-h-[30px] px-2.5 rounded-lg border border-slate-200 dark:border-slate-700 text-[11px] font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                >
+                  Đặt lại
+                </button>
+              </div>
+
+              {/* EQ Presets */}
+              <div className="flex flex-wrap gap-1.5">
+                {EQ_PRESETS.map((preset) => {
+                  const active = eqPreset === preset.id;
+                  return (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      onClick={() => onSelectEqPreset(preset.id)}
+                      className={`min-h-[34px] px-3 rounded-xl border text-xs font-medium transition cursor-pointer ${
+                        active
+                          ? 'bg-blue-600 border-blue-600 text-white font-semibold'
+                          : 'bg-slate-50 dark:bg-[#111318] border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:border-blue-500/50'
+                      }`}
+                    >
+                      {preset.label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* 5-Band EQ Sliders */}
+              <div className="grid grid-cols-1 sm:grid-cols-5 gap-2.5">
+                {EQ_BANDS.map((band, idx) => {
+                  const val = eqGains[idx] ?? 0;
+                  return (
+                    <div
+                      key={band.frequency}
+                      className="rounded-xl bg-slate-50 dark:bg-[#111318] border border-slate-200 dark:border-slate-800 px-3 py-2 flex sm:flex-col items-center justify-between gap-2.5"
+                    >
+                      <div className="w-20 sm:w-full flex sm:flex-col items-center justify-between sm:text-center shrink-0">
+                        <span className="font-semibold text-slate-700 dark:text-slate-200">
+                          {band.shortLabel}
+                        </span>
+                        <span className="text-[10px] text-slate-400 dark:text-slate-500 tabular-nums">
+                          {band.label}
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        aria-label={`Dải tần ${band.shortLabel} ${band.label}`}
+                        min={-12}
+                        max={12}
+                        step={1}
+                        value={val}
+                        onChange={(e) => onChangeEqBand(idx, Number(e.target.value))}
+                        className="flex-1 sm:w-full accent-blue-600 cursor-pointer h-1.5"
+                      />
+                      <span
+                        className={`w-12 sm:w-auto text-right sm:text-center font-semibold tabular-nums shrink-0 ${
+                          val > 0
+                            ? 'text-blue-600 dark:text-blue-400'
+                            : val < 0
+                              ? 'text-amber-600 dark:text-amber-400'
+                              : 'text-slate-500 dark:text-slate-400'
+                        }`}
+                      >
+                        {val > 0 ? `+${val} dB` : `${val} dB`}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                {isNativeAudio
+                  ? 'Đang áp dụng trực tiếp cho file âm thanh của chương.'
+                  : 'Áp dụng cho file âm thanh (.mp3, .m4a, .wav) và âm thanh nền (tiếng mưa / ồn nâu).'}
+              </p>
+            </div>
+          )}
+
+          {drawerTab === 'settings' && (
             <div className="max-h-[45vh] overflow-y-auto pb-2.5 mb-1 border-b border-slate-200/80 dark:border-slate-800 grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
               {!isNativeAudio && (
-                <div>
-                  <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                    Giọng đọc thiết bị
-                  </label>
-                  <div className="relative">
-                    <select
-                      value={selectedVoiceName}
-                      onChange={(e) => onChangeVoice(e.target.value)}
-                      className="w-full min-h-[40px] pl-3 pr-8 rounded-xl bg-slate-50 dark:bg-[#111318] border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-slate-100 appearance-none"
-                    >
-                      {voices.length === 0 ? (
-                        <option value="">Giọng mặc định hệ thống</option>
-                      ) : (
-                        voices.map((v) => (
-                          <option key={`${v.name}-${v.lang}`} value={v.name}>
-                            {v.name} ({v.lang})
+                <>
+                  <div>
+                    <label className="flex items-center gap-1.5 font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                      <Sparkles className="w-3.5 h-3.5 text-blue-500" />
+                      <span>Giọng đọc AI (Nghe Offline)</span>
+                    </label>
+                    <div className="relative">
+                      <select
+                        value={voiceProfileId}
+                        onChange={(e) => onChangeVoiceProfile(e.target.value as VoiceProfileId)}
+                        className="w-full min-h-[40px] pl-3 pr-8 rounded-xl bg-slate-50 dark:bg-[#111318] border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-slate-100 appearance-none"
+                      >
+                        {OFFLINE_VOICE_PROFILES.map((vp) => (
+                          <option key={vp.id} value={vp.id}>
+                            {vp.label}
                           </option>
-                        ))
-                      )}
-                    </select>
-                    <ChevronDown className="w-4 h-4 text-slate-400 absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                        ))}
+                      </select>
+                      <ChevronDown className="w-4 h-4 text-slate-400 absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    </div>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
+                      {OFFLINE_VOICE_PROFILES.find((vp) => vp.id === voiceProfileId)?.description}
+                    </p>
                   </div>
-                </div>
+
+                  <div>
+                    <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                      Giọng Tiếng Việt thiết bị
+                    </label>
+                    <div className="relative">
+                      <select
+                        value={selectedVoiceName}
+                        onChange={(e) => onChangeVoice(e.target.value)}
+                        className="w-full min-h-[40px] pl-3 pr-8 rounded-xl bg-slate-50 dark:bg-[#111318] border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-slate-100 appearance-none"
+                      >
+                        {voices.length === 0 ? (
+                          <option value="">Giọng Tiếng Việt mặc định (Offline)</option>
+                        ) : (
+                          <>
+                            <option value="">Tự động theo giọng AI (Tiếng Việt)</option>
+                            {voices.map((v) => (
+                              <option key={`${v.name}-${v.lang}`} value={v.name}>
+                                {v.name} ({v.lang}) · {v.localService ? 'Offline' : 'Cần mạng'}
+                              </option>
+                            ))}
+                          </>
+                        )}
+                      </select>
+                      <ChevronDown className="w-4 h-4 text-slate-400 absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    </div>
+                  </div>
+                </>
               )}
 
               <div>
@@ -297,12 +450,41 @@ export const ReaderPlayerView: React.FC<Props> = ({
               </div>
 
               <div className="sm:col-span-2 flex items-center justify-between gap-3 rounded-xl bg-slate-50 dark:bg-[#111318] border border-slate-200 dark:border-slate-800 px-3.5 py-2.5">
+                <div className="flex items-center gap-2 text-slate-700 dark:text-slate-300 min-w-0">
+                  <SkipForward className="w-4 h-4 text-blue-500 shrink-0" />
+                  <div className="min-w-0">
+                    <div className="font-medium text-slate-800 dark:text-slate-200">
+                      Tự động phát chương tiếp theo
+                    </div>
+                    <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                      Tự chuyển sang chương kế tiếp khi kết thúc chương hiện tại
+                    </div>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={autoPlayNext}
+                  onClick={onToggleAutoPlayNext}
+                  className={`min-h-[32px] px-3 rounded-lg font-semibold shrink-0 cursor-pointer transition-colors ${
+                    autoPlayNext
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
+                  }`}
+                >
+                  {autoPlayNext ? 'Đang bật' : 'Tắt'}
+                </button>
+              </div>
+
+              <div className="sm:col-span-2 flex items-center justify-between gap-3 rounded-xl bg-slate-50 dark:bg-[#111318] border border-slate-200 dark:border-slate-800 px-3.5 py-2.5">
                 <div className="flex items-center gap-2 text-slate-700 dark:text-slate-300">
                   <Sun className="w-4 h-4 text-amber-500 shrink-0" />
                   <span>Giữ sáng màn hình khi đang đọc chữ</span>
                 </div>
                 <button
                   type="button"
+                  role="switch"
+                  aria-checked={wakeLockEnabled}
                   onClick={onToggleWakeLock}
                   className={`min-h-[32px] px-3 rounded-lg font-semibold shrink-0 cursor-pointer ${
                     wakeLockEnabled
@@ -424,30 +606,49 @@ export const ReaderPlayerView: React.FC<Props> = ({
               </button>
             </div>
 
-            <button
-              type="button"
-              onClick={() => setShowAudioOpts((v) => !v)}
-              aria-expanded={showAudioOpts}
-              title="Cài đặt phát"
-              className={`min-h-[38px] px-2.5 sm:px-3 rounded-xl border text-xs font-semibold inline-flex items-center gap-1.5 shrink-0 cursor-pointer ${
-                showAudioOpts
-                  ? 'border-blue-500 bg-blue-600 text-white'
-                  : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#111318] text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800'
-              }`}
-            >
-              <SlidersHorizontal className="w-4 h-4 shrink-0" />
-              <span className="hidden sm:inline">Cài đặt</span>
-              {sleepMinutes > 0 && (
-                <span className="text-[10px] font-bold tabular-nums opacity-90">
-                  {sleepMinutes}p
-                </span>
-              )}
-              {showAudioOpts ? (
-                <ChevronDown className="w-3.5 h-3.5 shrink-0" />
-              ) : (
-                <ChevronUp className="w-3.5 h-3.5 shrink-0" />
-              )}
-            </button>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={() => setDrawerTab((t) => (t === 'eq' ? 'none' : 'eq'))}
+                aria-expanded={drawerTab === 'eq'}
+                title="Bộ chỉnh âm (Equalizer)"
+                className={`min-h-[38px] px-2.5 rounded-xl border text-xs font-semibold inline-flex items-center gap-1 cursor-pointer ${
+                  drawerTab === 'eq'
+                    ? 'border-blue-500 bg-blue-600 text-white'
+                    : eqPreset !== 'flat'
+                      ? 'border-blue-500/40 bg-blue-500/10 text-blue-700 dark:text-blue-300'
+                      : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#111318] text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800'
+                }`}
+              >
+                <AudioLines className="w-4 h-4 shrink-0" />
+                <span>EQ</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setDrawerTab((t) => (t === 'settings' ? 'none' : 'settings'))}
+                aria-expanded={drawerTab === 'settings'}
+                title="Cài đặt phát"
+                className={`min-h-[38px] px-2.5 sm:px-3 rounded-xl border text-xs font-semibold inline-flex items-center gap-1 shrink-0 cursor-pointer ${
+                  drawerTab === 'settings'
+                    ? 'border-blue-500 bg-blue-600 text-white'
+                    : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#111318] text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800'
+                }`}
+              >
+                <SlidersHorizontal className="w-4 h-4 shrink-0" />
+                <span className="hidden sm:inline">Cài đặt</span>
+                {sleepMinutes > 0 && (
+                  <span className="text-[10px] font-bold tabular-nums opacity-90">
+                    {sleepMinutes}p
+                  </span>
+                )}
+                {drawerTab === 'settings' ? (
+                  <ChevronDown className="w-3.5 h-3.5 shrink-0" />
+                ) : (
+                  <ChevronUp className="w-3.5 h-3.5 shrink-0" />
+                )}
+              </button>
+            </div>
           </div>
         </div>
       </div>

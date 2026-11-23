@@ -1,9 +1,11 @@
 import React, { useMemo, useState } from 'react';
 import {
   CheckCircle2,
+  Clock,
   Cloud,
   Download,
   Headphones,
+  Play,
   Plus,
   Search,
   Tag,
@@ -38,6 +40,18 @@ function computeStoryProgress(story: Story, prog?: ListeningProgress): {
     ? Math.min(100, Math.max(1, Math.round(raw)))
     : 0;
   return { percent, currentChapter: chIdx + 1, started: true };
+}
+
+function formatRelativeTime(timestamp: number): string {
+  const diffSec = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+  if (diffSec < 60) return 'Vừa nghe';
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return `${diffMin} phút trước`;
+  const diffHours = Math.floor(diffMin / 60);
+  if (diffHours < 24) return `${diffHours} giờ trước`;
+  const diffDays = Math.floor(diffHours / 24);
+  if (diffDays < 7) return `${diffDays} ngày trước`;
+  return new Date(timestamp).toLocaleDateString('vi-VN');
 }
 
 interface Props {
@@ -105,17 +119,17 @@ export const LibraryView: React.FC<Props> = ({
     [stories]
   );
 
-  const mostRecentProgress = useMemo(() => {
-    let best: ListeningProgress | null = null;
-    for (const p of Object.values(progressMap)) {
-      if (!best || p.updatedAt > best.updatedAt) {
-        best = p;
-      }
-    }
-    if (!best) return null;
-    const st = stories.find((s) => s.id === best!.storyId);
-    if (!st || st.chapters.length === 0) return null;
-    return { story: st, progress: best };
+  const recentlyListened = useMemo(() => {
+    const storyById = new Map<string, Story>(stories.map((s) => [s.id, s]));
+    return Object.values(progressMap)
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .map((progress) => {
+        const story = storyById.get(progress.storyId);
+        if (!story || story.chapters.length === 0) return null;
+        return { story, progress };
+      })
+      .filter((item): item is { story: Story; progress: ListeningProgress } => item !== null)
+      .slice(0, 10);
   }, [progressMap, stories]);
 
   const normalizeSearchText = (value: string) =>
@@ -206,67 +220,105 @@ export const LibraryView: React.FC<Props> = ({
         </button>
       </div>
 
-      {/* Continue Listening Banner */}
-      {mostRecentProgress && (() => {
-        const bannerProg = computeStoryProgress(
-          mostRecentProgress.story,
-          mostRecentProgress.progress
-        );
-        return (
-          <div className="rounded-2xl bg-white dark:bg-[#1a1d24] border border-slate-200 dark:border-slate-800 p-4 flex flex-col sm:flex-row sm:items-center gap-3.5 sm:gap-4">
-            <div className="flex items-center gap-3.5 min-w-0 flex-1">
-              <StoryCover
-                title={mostRecentProgress.story.title}
-                cover={mostRecentProgress.story.cover}
-                className="w-14 h-18 sm:w-16 sm:h-20 rounded-xl shrink-0"
-              />
-              <div className="min-w-0 flex-1">
-                <div className="text-xs font-medium text-blue-600 dark:text-blue-400">
-                  Nghe tiếp gần đây
-                  {mostRecentProgress.progress.deviceName
-                    ? ` · từ ${mostRecentProgress.progress.deviceName}`
-                    : ''}
-                </div>
-                <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100 truncate mt-0.5">
-                  {mostRecentProgress.story.title}
-                </h3>
-                <p className="text-xs text-slate-600 dark:text-slate-400 truncate mt-0.5 tabular-nums">
-                  Chương {mostRecentProgress.progress.chapterIndex + 1}/
-                  {mostRecentProgress.story.chapters.length}
-                  {mostRecentProgress.progress.chapterTitle
-                    ? ` · ${mostRecentProgress.progress.chapterTitle}`
-                    : ''}
-                </p>
-                <div className="mt-2 flex items-center gap-2">
-                  <div
-                    role="progressbar"
-                    aria-valuenow={bannerProg.percent}
-                    aria-valuemin={0}
-                    aria-valuemax={100}
-                    aria-label={`Tiến độ nghe ${mostRecentProgress.story.title}`}
-                    className="h-1.5 flex-1 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden"
-                  >
-                    <div
-                      className="h-full rounded-full bg-blue-600 dark:bg-blue-500 transition-all duration-300"
-                      style={{ width: `${bannerProg.percent}%` }}
-                    />
-                  </div>
-                  <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 tabular-nums shrink-0">
-                    {bannerProg.percent}%
-                  </span>
-                </div>
-              </div>
+      {/* Recently Listened Section (last 10 stories played) */}
+      {recentlyListened.length > 0 && (
+        <section aria-label="Nghe gần đây" className="space-y-3">
+          <div className="flex items-center justify-between gap-2 px-0.5">
+            <div className="flex items-center gap-2">
+              <Clock className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
+              <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100">
+                Nghe gần đây
+              </h3>
             </div>
-            <button
-              onClick={() => onResumeStory(mostRecentProgress.story.id)}
-              className="w-full sm:w-auto min-h-[44px] px-4 rounded-xl bg-blue-600 text-white text-sm font-semibold inline-flex items-center justify-center gap-2 hover:bg-blue-700 transition whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              <Headphones className="w-4 h-4" />
-              <span>Nghe tiếp</span>
-            </button>
+            <span className="text-xs text-slate-500 dark:text-slate-400 tabular-nums">
+              {recentlyListened.length}/10 truyện gần nhất
+            </span>
           </div>
-        );
-      })()}
+
+          <div className="flex gap-3 overflow-x-auto pb-2 snap-x snap-mandatory">
+            {recentlyListened.map(({ story, progress }, idx) => {
+              const progInfo = computeStoryProgress(story, progress);
+              return (
+                <div
+                  key={story.id}
+                  onClick={() => onOpenStory(story.id)}
+                  className="w-72 sm:w-80 shrink-0 snap-start rounded-2xl bg-white dark:bg-[#1a1d24] border border-slate-200 dark:border-slate-800 p-3.5 flex flex-col justify-between gap-3 hover:border-blue-500/60 transition-colors cursor-pointer"
+                >
+                  <div className="flex items-start gap-3 min-w-0">
+                    <StoryCover
+                      title={story.title}
+                      cover={story.cover}
+                      className="w-12 h-16 rounded-xl shrink-0"
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center justify-between gap-1.5 text-[11px]">
+                        <span
+                          className={`font-semibold truncate ${
+                            idx === 0
+                              ? 'text-blue-600 dark:text-blue-400'
+                              : 'text-slate-500 dark:text-slate-400'
+                          }`}
+                        >
+                          {idx === 0 ? 'Nghe mới nhất' : formatRelativeTime(progress.updatedAt)}
+                        </span>
+                        {progress.deviceName && (
+                          <span className="text-slate-400 dark:text-slate-500 truncate max-w-[96px]">
+                            {progress.deviceName}
+                          </span>
+                        )}
+                      </div>
+                      <h4 className="text-sm font-semibold text-slate-900 dark:text-slate-100 truncate mt-0.5">
+                        {story.title}
+                      </h4>
+                      <p className="text-xs text-slate-600 dark:text-slate-400 truncate mt-0.5 tabular-nums">
+                        Ch. {progInfo.currentChapter}/{story.chapters.length}
+                        {progress.chapterTitle ? ` · ${progress.chapterTitle}` : ''}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-2">
+                      <div
+                        role="progressbar"
+                        aria-valuenow={progInfo.percent}
+                        aria-valuemin={0}
+                        aria-valuemax={100}
+                        aria-label={`Tiến độ nghe ${story.title}`}
+                        className="h-1.5 flex-1 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden"
+                      >
+                        <div
+                          className={`h-full rounded-full transition-all duration-300 ${
+                            progInfo.percent >= 100
+                              ? 'bg-emerald-500'
+                              : 'bg-blue-600 dark:bg-blue-500'
+                          }`}
+                          style={{ width: `${progInfo.percent}%` }}
+                        />
+                      </div>
+                      <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 tabular-nums shrink-0">
+                        {progInfo.percent}%
+                      </span>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onResumeStory(story.id);
+                      }}
+                      className="w-full min-h-[38px] px-3 rounded-xl bg-blue-600/10 dark:bg-blue-500/15 text-blue-700 dark:text-blue-300 hover:bg-blue-600 hover:text-white dark:hover:bg-blue-600 dark:hover:text-white text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                    >
+                      <Play className="w-3.5 h-3.5" />
+                      <span>Nghe tiếp Ch. {progInfo.currentChapter}</span>
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
 
       {/* Search, Genre Filter & Segmented Filter */}
       <div className="space-y-2.5">

@@ -31,6 +31,14 @@ import { SyncSettingsView } from '@/src/components/SyncSettingsView';
 import { useOnlineStatus } from '@/src/hooks/useOnlineStatus';
 import { useTheme } from '@/src/hooks/useTheme';
 import {
+  loadSavedEqState,
+  resumeAndSyncEqualizer,
+  saveEqState,
+  updateEqualizerGainsOnAudio,
+  type EqGains,
+  type EqState,
+} from '@/src/lib/audioEqualizer';
+import {
   clearMediaSession,
   getDeviceLabel,
   keepAliveEngine,
@@ -73,17 +81,21 @@ import {
   processCoverImage,
   sanitizeId,
 } from '@/src/lib/parsers';
-import type {
-  AmbientMode,
-  ChapterContent,
-  ChapterSummary,
-  ListeningProgress,
-  NavTab,
-  PlaybackContext,
-  Playlist,
-  PlaylistItem,
-  Story,
-  TextChunk,
+import {
+  EQ_PRESETS,
+  OFFLINE_VOICE_PROFILES,
+  type AmbientMode,
+  type ChapterContent,
+  type ChapterSummary,
+  type EqPresetId,
+  type ListeningProgress,
+  type NavTab,
+  type PlaybackContext,
+  type Playlist,
+  type PlaylistItem,
+  type Story,
+  type TextChunk,
+  type VoiceProfileId,
 } from '@/src/types';
 
 export default function App() {
@@ -154,6 +166,14 @@ export default function App() {
       return '';
     }
   });
+  const [voiceProfileId, setVoiceProfileId] = useState<VoiceProfileId>(() => {
+    try {
+      const saved = localStorage.getItem('truyen_audio_voice_profile') as VoiceProfileId | null;
+      return OFFLINE_VOICE_PROFILES.some((p) => p.id === saved) ? saved! : 'natural';
+    } catch {
+      return 'natural';
+    }
+  });
   const [rate, setRate] = useState<number>(() => {
     try {
       return Number(localStorage.getItem('truyen_audio_rate')) || 1;
@@ -171,6 +191,15 @@ export default function App() {
     }
   });
   const [wakeLockEnabled, setWakeLockEnabled] = useState(false);
+  const [autoPlayNext, setAutoPlayNext] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('truyen_audio_autoplay_next');
+      return saved === null ? true : saved === 'true';
+    } catch {
+      return true;
+    }
+  });
+  const [eqState, setEqState] = useState<EqState>(() => loadSavedEqState());
 
   // Native <audio> element state for imported mp3/wav/m4a chapters
   const nativeAudioRef = useRef<HTMLAudioElement | null>(null);
@@ -191,7 +220,10 @@ export default function App() {
   const rateRef = useRef(rate);
   const voicesRef = useRef(voices);
   const selectedVoiceRef = useRef(selectedVoiceName);
+  const voiceProfileRef = useRef(voiceProfileId);
   const ambientModeRef = useRef(ambientMode);
+  const autoPlayNextRef = useRef(autoPlayNext);
+  const eqGainsRef = useRef<EqGains>(eqState.gains);
   const playbackContextRef = useRef(playbackContext);
   const userRef = useRef(user);
   const isOnlineRef = useRef(isOnline);
@@ -207,7 +239,10 @@ export default function App() {
   rateRef.current = rate;
   voicesRef.current = voices;
   selectedVoiceRef.current = selectedVoiceName;
+  voiceProfileRef.current = voiceProfileId;
   ambientModeRef.current = ambientMode;
+  autoPlayNextRef.current = autoPlayNext;
+  eqGainsRef.current = eqState.gains;
   playbackContextRef.current = playbackContext;
   userRef.current = user;
   isOnlineRef.current = isOnline;
@@ -248,20 +283,21 @@ export default function App() {
     refreshLocalData();
   }, [refreshLocalData, toast]);
 
-  // Load device TTS voices
+  // Load Vietnamese device TTS voices (offline voices prioritized)
   useEffect(() => {
     if (!('speechSynthesis' in window)) return;
     const loadVoices = () => {
       const list = window.speechSynthesis.getVoices();
       if (!list.length) return;
+      const viVoices = list.filter((v) => /^vi/i.test(v.lang) || /viet/i.test(v.name));
       const sorted = [
-        ...list.filter((v) => /^vi/i.test(v.lang)),
-        ...list.filter((v) => !/^vi/i.test(v.lang)),
+        ...viVoices.filter((v) => v.localService),
+        ...viVoices.filter((v) => !v.localService),
       ];
       setVoices(sorted);
       setSelectedVoiceName((prev) => {
-        if (prev && sorted.some((v) => v.name === prev)) return prev;
-        return sorted[0]?.name || '';
+        if (!prev) return '';
+        return sorted.some((v) => v.name === prev) ? prev : '';
       });
     };
     loadVoices();
@@ -380,6 +416,9 @@ export default function App() {
     [activeChapterContent, saveProgress]
   );
 
+  const pausePlaybackRef = useRef(pausePlayback);
+  pausePlaybackRef.current = pausePlayback;
+
   // Forward ref for chapter open & advance so MediaSession and onend callbacks never go stale
   const openChapterRef = useRef<
     (
@@ -439,7 +478,12 @@ export default function App() {
       }
       const list = chunksRef.current;
       if (startIndex >= list.length) {
-        handleAdvanceChapter(1);
+        if (autoPlayNextRef.current) {
+          handleAdvanceChapter(1);
+        } else {
+          pausePlaybackRef.current(true);
+          toast('Đã phát hết chương hiện tại');
+        }
         return;
       }
 
@@ -452,14 +496,52 @@ export default function App() {
 
       const chunkText = list[startIndex].t;
       const utterance = new SpeechSynthesisUtterance(chunkText);
-      const chosen = voicesRef.current.find((v) => v.name === selectedVoiceRef.current);
+      const profile =
+        OFFLINE_VOICE_PROFILES.find((p) => p.id === voiceProfileRef.current) ||
+        OFFLINE_VOICE_PROFILES[0];
+
+      const offlinePool = voicesRef.current.filter((v) => v.localService);
+      const pool =
+        !isOnlineRef.current && offlinePool.length > 0 ? offlinePool : voicesRef.current;
+
+      let chosen = selectedVoiceRef.current
+        ? voicesRef.current.find((v) => v.name === selectedVoiceRef.current)
+        : undefined;
+
+      if (chosen && !isOnlineRef.current && !chosen.localService && offlinePool.length > 0) {
+        chosen = undefined;
+      }
+
+      if (!chosen && pool.length > 0) {
+        if (profile.preferredGender === 'female') {
+          chosen = pool.find((v) =>
+            /hoaimy|hoài my|linh|chi|my\b|nu\b|nữ|female|woman|mai\b|lan\b|huong|ngoc|trang|thao/i.test(
+              v.name
+            )
+          );
+        } else if (profile.preferredGender === 'male') {
+          chosen = pool.find((v) =>
+            /namminh|nam minh|nam\b|minh\b|male|man\b|hung|hùng|tuan|tuấn|duy\b|hoang|phong/i.test(
+              v.name
+            )
+          );
+        }
+        if (!chosen) chosen = pool[0];
+      }
+
       if (chosen) {
         utterance.voice = chosen;
         utterance.lang = chosen.lang;
       } else {
         utterance.lang = 'vi-VN';
       }
-      utterance.rate = rateRef.current;
+
+      const effectiveRate = Math.min(
+        2.5,
+        Math.max(0.5, Number((rateRef.current * profile.rateScale).toFixed(2)))
+      );
+      utterance.pitch = profile.pitch;
+      utterance.rate = effectiveRate;
 
       const sid = activeStoryIdRef.current;
       const st = storiesRef.current.find((s) => s.id === sid);
@@ -490,7 +572,10 @@ export default function App() {
       };
 
       // Mobile TTS stall watchdog
-      const approxMs = Math.max(12000, Math.round((chunkText.length / (10 * rateRef.current)) * 1000) + 9000);
+      const approxMs = Math.max(
+        12000,
+        Math.round((chunkText.length / (10 * effectiveRate)) * 1000) + 9000
+      );
       watchdogRef.current = window.setTimeout(() => {
         if (token === speechTokenRef.current && playingRef.current) {
           window.speechSynthesis.cancel();
@@ -512,6 +597,19 @@ export default function App() {
     setIsPlaying(true);
     playingRef.current = true;
 
+    const sid = activeStoryIdRef.current;
+    if (sid) {
+      saveProgress(
+        sid,
+        activeChapterIdxRef.current,
+        chunkIndexRef.current,
+        nativeAudioRef.current?.currentTime || 0,
+        chunksRef.current.length,
+        activeChapterContent.title,
+        false
+      );
+    }
+
     const st = storiesRef.current.find((s) => s.id === activeStoryIdRef.current);
     if (st) {
       updateMediaSession(
@@ -528,6 +626,7 @@ export default function App() {
     if (activeChapterContent.audioBlob && nativeAudioRef.current) {
       nativeAudioRef.current.playbackRate = rateRef.current;
       try {
+        await resumeAndSyncEqualizer(nativeAudioRef.current, eqGainsRef.current);
         await nativeAudioRef.current.play();
       } catch {
         toast('Nhấn lại nút Phát để trình duyệt kích hoạt âm thanh.');
@@ -537,8 +636,11 @@ export default function App() {
     }
 
     await keepAliveEngine.start(ambientModeRef.current);
+    if (ambientModeRef.current !== 'silent') {
+      await resumeAndSyncEqualizer(keepAliveEngine.getAudioElement(), eqGainsRef.current);
+    }
     speakCurrentChunk(chunkIndexRef.current);
-  }, [activeChapterContent, speakCurrentChunk, toast]);
+  }, [activeChapterContent, saveProgress, speakCurrentChunk, toast]);
 
   const mediaHandlersRef = useRef({
     onPlay: () => startPlayback(),
@@ -697,13 +799,19 @@ export default function App() {
           setAudioCurrentTime(audio.currentTime || 0);
         };
         audio.onended = () => {
-          handleAdvanceChapter(1);
+          if (autoPlayNextRef.current) {
+            handleAdvanceChapter(1);
+          } else {
+            pausePlaybackRef.current(true);
+            toast('Đã phát hết chương hiện tại');
+          }
         };
         if (autoPlay) {
           setIsPlaying(true);
           playingRef.current = true;
           keepAliveEngine.stop();
           try {
+            await resumeAndSyncEqualizer(audio, eqGainsRef.current);
             await audio.play();
           } catch {
             setIsPlaying(false);
@@ -713,6 +821,9 @@ export default function App() {
         setIsPlaying(true);
         playingRef.current = true;
         await keepAliveEngine.start(ambientModeRef.current);
+        if (ambientModeRef.current !== 'silent') {
+          await resumeAndSyncEqualizer(keepAliveEngine.getAudioElement(), eqGainsRef.current);
+        }
         // Slight delay so state refs settle cleanly before uttering
         window.setTimeout(() => {
           if (playingRef.current) {
@@ -721,6 +832,18 @@ export default function App() {
         }, 50);
       } else {
         setIsPlaying(false);
+      }
+
+      if (autoPlay) {
+        saveProgress(
+          storyId,
+          chapterIdx,
+          initialChunk,
+          initialAudioTime,
+          parsedChunks.length,
+          content.title,
+          false
+        );
       }
 
       updateMediaSession(
@@ -733,7 +856,7 @@ export default function App() {
         mediaHandlersRef.current
       );
     },
-    [handleAdvanceChapter, progressMap, refreshLocalData, speakCurrentChunk, toast]
+    [handleAdvanceChapter, progressMap, refreshLocalData, saveProgress, speakCurrentChunk, toast]
   );
 
   openChapterRef.current = openChapter;
@@ -1564,10 +1687,14 @@ export default function App() {
               audioDuration={audioDuration}
               voices={voices}
               selectedVoiceName={selectedVoiceName}
+              voiceProfileId={voiceProfileId}
+              eqPreset={eqState.preset}
+              eqGains={eqState.gains}
               rate={rate}
               sleepMinutes={sleepMinutes}
               ambientMode={ambientMode}
               wakeLockEnabled={wakeLockEnabled}
+              autoPlayNext={autoPlayNext}
               playlistLabel={activePlaylistLabel}
               onBack={() => setIsReaderOpen(false)}
               onTogglePlay={() => (isPlaying ? pausePlayback(true) : startPlayback())}
@@ -1603,6 +1730,48 @@ export default function App() {
                 } catch {}
                 if (isPlaying) speakCurrentChunk(chunkIndexRef.current);
               }}
+              onChangeVoiceProfile={(id) => {
+                setVoiceProfileId(id);
+                voiceProfileRef.current = id;
+                try {
+                  localStorage.setItem('truyen_audio_voice_profile', id);
+                } catch {}
+                if (isPlaying && !activeChapterContent.audioBlob) {
+                  speakCurrentChunk(chunkIndexRef.current);
+                }
+              }}
+              onSelectEqPreset={(presetId) => {
+                const found = EQ_PRESETS.find((p) => p.id === presetId);
+                if (!found) return;
+                const next: EqState = {
+                  preset: found.id,
+                  gains: [...found.gains] as EqGains,
+                };
+                setEqState(next);
+                eqGainsRef.current = next.gains;
+                saveEqState(next);
+                updateEqualizerGainsOnAudio(nativeAudioRef.current, next.gains);
+                updateEqualizerGainsOnAudio(keepAliveEngine.getAudioElement(), next.gains);
+              }}
+              onChangeEqBand={(bandIdx, db) => {
+                const clamped = Math.max(-12, Math.min(12, Math.round(db)));
+                setEqState((prev) => {
+                  const nextGains = [...prev.gains] as EqGains;
+                  nextGains[bandIdx] = clamped;
+                  const matched = EQ_PRESETS.find((p) =>
+                    p.gains.every((v, i) => v === nextGains[i])
+                  );
+                  const next: EqState = {
+                    preset: matched ? matched.id : 'custom',
+                    gains: nextGains,
+                  };
+                  eqGainsRef.current = nextGains;
+                  saveEqState(next);
+                  updateEqualizerGainsOnAudio(nativeAudioRef.current, nextGains);
+                  updateEqualizerGainsOnAudio(keepAliveEngine.getAudioElement(), nextGains);
+                  return next;
+                });
+              }}
               onChangeRate={(r) => {
                 setRate(r);
                 rateRef.current = r;
@@ -1626,13 +1795,16 @@ export default function App() {
                   toast(`Hẹn giờ tắt sau ${mins} phút`);
                 }
               }}
-              onChangeAmbient={(mode) => {
+              onChangeAmbient={async (mode) => {
                 setAmbientMode(mode);
                 ambientModeRef.current = mode;
                 try {
                   localStorage.setItem('truyen_audio_ambient', mode);
                 } catch {}
-                keepAliveEngine.setMode(mode, isPlaying && !activeChapterContent.audioBlob);
+                await keepAliveEngine.setMode(mode, isPlaying && !activeChapterContent.audioBlob);
+                if (mode !== 'silent' && isPlaying && !activeChapterContent.audioBlob) {
+                  await resumeAndSyncEqualizer(keepAliveEngine.getAudioElement(), eqGainsRef.current);
+                }
               }}
               onToggleWakeLock={async () => {
                 const next = !wakeLockEnabled;
@@ -1640,10 +1812,27 @@ export default function App() {
                 setWakeLockEnabled(next ? ok : false);
                 if (next && !ok) toast('Thiết bị không hỗ trợ giữ sáng màn hình.');
               }}
+              onToggleAutoPlayNext={() => {
+                setAutoPlayNext((prev) => {
+                  const next = !prev;
+                  autoPlayNextRef.current = next;
+                  try {
+                    localStorage.setItem('truyen_audio_autoplay_next', String(next));
+                  } catch {}
+                  toast(
+                    next
+                      ? 'Đã bật tự động phát chương tiếp theo'
+                      : 'Đã tắt tự động phát chương tiếp theo'
+                  );
+                  return next;
+                });
+              }}
             />
           ) : tab === 'library' && selectedStory ? (
             <StoryDetailView
               story={selectedStory}
+              allStories={stories}
+              progressMap={progressMap}
               progress={progressMap[selectedStory.id]}
               activeChapterIndex={
                 activeStoryId === selectedStory.id ? activeChapterIndex : null
@@ -1653,6 +1842,10 @@ export default function App() {
               isDownloadingAll={downloadingStoryId === selectedStory.id}
               downloadProgressText={downloadProgressText}
               onBack={() => setSelectedStoryId(null)}
+              onOpenStory={(sid) => {
+                setSelectedStoryId(sid);
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+              }}
               onPlayChapter={(chIdx) => openChapter(selectedStory.id, chIdx, true, { mode: 'story' })}
               onAddChapters={(files) => handleAddChapters(selectedStory.id, files)}
               onUpdateCover={(f) => handleUpdateCover(selectedStory.id, f)}
