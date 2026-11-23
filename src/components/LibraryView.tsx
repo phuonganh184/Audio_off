@@ -76,18 +76,28 @@ export const LibraryView: React.FC<Props> = ({
   const [newCover, setNewCover] = useState<File | undefined>(undefined);
   const [creating, setCreating] = useState(false);
 
-  const genreOptions = useMemo(() => {
+  const usedGenreOptions = useMemo(() => {
     const counts = new Map<string, number>();
-    for (const g of STORY_GENRES) {
-      counts.set(g, 0);
-    }
     for (const s of stories) {
       const g = s.genre?.trim();
       if (g) {
         counts.set(g, (counts.get(g) ?? 0) + 1);
       }
     }
-    return Array.from(counts.entries()).map(([name, count]) => ({ name, count }));
+    if (counts.size === 0) {
+      return STORY_GENRES.map((name) => ({ name, count: 0 }));
+    }
+    const presetOrder = new Map<string, number>(
+      STORY_GENRES.map((g, i) => [g.toLowerCase(), i])
+    );
+    return Array.from(counts.entries())
+      .sort(([a], [b]) => {
+        const ia = presetOrder.get(a.toLowerCase()) ?? Number.MAX_SAFE_INTEGER;
+        const ib = presetOrder.get(b.toLowerCase()) ?? Number.MAX_SAFE_INTEGER;
+        if (ia !== ib) return ia - ib;
+        return a.localeCompare(b, 'vi');
+      })
+      .map(([name, count]) => ({ name, count }));
   }, [stories]);
 
   const uncategorizedCount = useMemo(
@@ -284,25 +294,6 @@ export const LibraryView: React.FC<Props> = ({
               </button>
             )}
           </div>
-          <div className="relative sm:w-52 shrink-0">
-            <Tag className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-            <select
-              aria-label="Lọc theo thể loại"
-              value={genreFilter}
-              onChange={(e) => setGenreFilter(e.target.value)}
-              className="w-full min-h-[44px] pl-10 pr-8 rounded-xl bg-white dark:bg-[#1a1d24] border border-slate-200 dark:border-slate-800 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500/40 cursor-pointer"
-            >
-              <option value="all">Tất cả thể loại ({stories.length})</option>
-              {genreOptions.map((g) => (
-                <option key={g.name} value={g.name}>
-                  {g.count > 0 ? `${g.name} (${g.count})` : g.name}
-                </option>
-              ))}
-              {uncategorizedCount > 0 && (
-                <option value="__uncategorized__">Chưa phân loại ({uncategorizedCount})</option>
-              )}
-            </select>
-          </div>
           <div className="grid grid-cols-3 sm:inline-flex items-center gap-1 p-1 rounded-xl bg-slate-200/70 dark:bg-[#1a1d24] border border-slate-200 dark:border-slate-800 w-full sm:w-auto shrink-0">
             {(
               [
@@ -325,6 +316,64 @@ export const LibraryView: React.FC<Props> = ({
             ))}
           </div>
         </div>
+
+        {/* Dedicated Genre Filter Bar above story list */}
+        <div
+          role="region"
+          aria-label="Thanh bộ lọc theo thể loại"
+          className="flex items-center gap-2 overflow-x-auto pb-1"
+        >
+          <span className="inline-flex items-center gap-1 text-xs font-medium text-slate-500 dark:text-slate-400 shrink-0 pr-0.5">
+            <Tag className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Thể loại:</span>
+          </span>
+          <button
+            type="button"
+            onClick={() => setGenreFilter('all')}
+            className={`min-h-[36px] px-3 rounded-xl border text-xs font-semibold transition whitespace-nowrap shrink-0 cursor-pointer ${
+              genreFilter === 'all'
+                ? 'bg-blue-600 border-blue-600 text-white'
+                : 'bg-white dark:bg-[#1a1d24] border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:border-blue-500/50'
+            }`}
+          >
+            Tất cả{stories.length > 0 ? ` (${stories.length})` : ''}
+          </button>
+          {usedGenreOptions.map((g) => {
+            const active = genreFilter.toLowerCase() === g.name.toLowerCase();
+            return (
+              <button
+                key={g.name}
+                type="button"
+                onClick={() => setGenreFilter(active ? 'all' : g.name)}
+                className={`min-h-[36px] px-3 rounded-xl border text-xs font-medium transition whitespace-nowrap shrink-0 cursor-pointer ${
+                  active
+                    ? 'bg-blue-600 border-blue-600 text-white font-semibold'
+                    : 'bg-white dark:bg-[#1a1d24] border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:border-blue-500/50'
+                }`}
+              >
+                {g.count > 0 ? `${g.name} (${g.count})` : g.name}
+              </button>
+            );
+          })}
+          {uncategorizedCount > 0 && uncategorizedCount < stories.length && (
+            <button
+              type="button"
+              onClick={() =>
+                setGenreFilter(
+                  genreFilter === '__uncategorized__' ? 'all' : '__uncategorized__'
+                )
+              }
+              className={`min-h-[36px] px-3 rounded-xl border text-xs font-medium transition whitespace-nowrap shrink-0 cursor-pointer ${
+                genreFilter === '__uncategorized__'
+                  ? 'bg-blue-600 border-blue-600 text-white font-semibold'
+                  : 'bg-white dark:bg-[#1a1d24] border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:border-blue-500/50'
+              }`}
+            >
+              Chưa phân loại ({uncategorizedCount})
+            </button>
+          )}
+        </div>
+
         {(search.trim() || genreFilter !== 'all' || filter !== 'all') && stories.length > 0 && (
           <div className="flex items-center justify-between gap-2 text-xs text-slate-500 dark:text-slate-400 px-1">
             <span className="tabular-nums">

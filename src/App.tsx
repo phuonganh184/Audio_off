@@ -1537,9 +1537,11 @@ export default function App() {
       {/* Main Content Area */}
       <main
         className={`flex-1 md:pl-64 min-w-0 ${
-          activeStory && activeChapterContent && !isReaderOpen
-            ? 'pb-[calc(9.5rem+env(safe-area-inset-bottom,0px))] md:pb-24'
-            : 'pb-[calc(5.75rem+env(safe-area-inset-bottom,0px))] md:pb-12'
+          isReaderOpen && activeStory && activeChapterContent
+            ? 'pb-6'
+            : activeStory && activeChapterContent && !isReaderOpen
+              ? 'pb-[calc(9.5rem+env(safe-area-inset-bottom,0px))] md:pb-24'
+              : 'pb-[calc(5.75rem+env(safe-area-inset-bottom,0px))] md:pb-12'
         }`}
       >
         <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-5 sm:py-8">
@@ -1920,34 +1922,36 @@ export default function App() {
         />
       )}
 
-      {/* Mobile Fixed Bottom Navigation Bar */}
-      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-30 pb-safe border-t border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-[#161920]/95 backdrop-blur-md">
-        <div className="h-16 grid grid-cols-4 items-center">
-          {navItems.map(({ id, label, Icon }) => {
-            const active = tab === id && !isReaderOpen;
-            return (
-              <button
-                key={id}
-                onClick={() => {
-                  setTab(id);
-                  setIsReaderOpen(false);
-                  if (id !== 'library') setSelectedStoryId(null);
-                }}
-                className={`min-h-[48px] flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
-                  active
-                    ? 'text-blue-600 dark:text-blue-400'
-                    : 'text-slate-500 dark:text-slate-400'
-                }`}
-              >
-                <Icon className="w-5 h-5" />
-                <span className="text-[10px] font-medium tracking-tight truncate max-w-[76px]">
-                  {label}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      </nav>
+      {/* Mobile Fixed Bottom Navigation Bar (hidden while full reader player dock is active) */}
+      {!(isReaderOpen && activeStory && activeChapterContent) && (
+        <nav className="md:hidden fixed bottom-0 left-0 right-0 z-30 pb-safe border-t border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-[#161920]/95 backdrop-blur-md">
+          <div className="h-16 grid grid-cols-4 items-center">
+            {navItems.map(({ id, label, Icon }) => {
+              const active = tab === id && !isReaderOpen;
+              return (
+                <button
+                  key={id}
+                  onClick={() => {
+                    setTab(id);
+                    setIsReaderOpen(false);
+                    if (id !== 'library') setSelectedStoryId(null);
+                  }}
+                  className={`min-h-[48px] flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
+                    active
+                      ? 'text-blue-600 dark:text-blue-400'
+                      : 'text-slate-500 dark:text-slate-400'
+                  }`}
+                >
+                  <Icon className="w-5 h-5" />
+                  <span className="text-[10px] font-medium tracking-tight truncate max-w-[76px]">
+                    {label}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </nav>
+      )}
 
       {/* Add to Playlist Modal */}
       {playlistModalTarget && (
