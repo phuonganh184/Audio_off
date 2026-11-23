@@ -58,13 +58,14 @@ service cloud.firestore {
 
     function isValidStory(data, userId, storyId) {
       return data.keys().hasAll(['id', 'ownerId', 'title', 'chapterCount', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['id', 'ownerId', 'title', 'author', 'cover', 'chapterCount', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'ownerId', 'title', 'author', 'genre', 'cover', 'chapterCount', 'createdAt', 'updatedAt'])
         && isValidId(data.id)
         && data.id == storyId
         && isValidId(data.ownerId)
         && data.ownerId == userId
         && data.title is string && data.title.size() >= 1 && data.title.size() <= 200
         && (!('author' in data) || (data.author is string && data.author.size() <= 120))
+        && (!('genre' in data) || (data.genre is string && data.genre.size() <= 60))
         && (!('cover' in data) || (data.cover is string && data.cover.size() <= 250000))
         && data.chapterCount is int && data.chapterCount >= 0 && data.chapterCount <= 10000
         && data.createdAt is timestamp
@@ -166,7 +167,7 @@ service cloud.firestore {
           && incoming().ownerId == existing().ownerId
           && incoming().createdAt == existing().createdAt
           && incoming().updatedAt == request.time
-          && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'author', 'cover', 'chapterCount', 'updatedAt'])
+          && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'author', 'genre', 'cover', 'chapterCount', 'updatedAt'])
           && userProfileExists(userId);
         allow delete: if isValidId(userId) && isValidId(storyId) && isOwner(userId);
 

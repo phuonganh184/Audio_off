@@ -1,12 +1,12 @@
 {
-  "projectId": "totemic-works-8k4jk",
-  "appId": "1:52260581312:web:9b060158faa7f5ba91a225",
-  "apiKey": "AIzaSyC9iMMuERQ2-1SyzLtx4QuhdmKALMsJ4Rg",
-  "authDomain": "totemic-works-8k4jk.firebaseapp.com",
+  "projectId": "audio-c60da",
+  "appId": "1:172723095952:web:5de9adbf36d434fa0b0b15",
+  "apiKey": "AIzaSyDngXaV64lwcrgZ9ZWP2n-AtXsSBqln87I",
+  "authDomain": "audio-c60da.firebaseapp.com",
   "firestoreDatabaseId": "ai-studio-fe8c080d-0049-4ef2-8af7-b7bf8738e9e7",
-  "storageBucket": "totemic-works-8k4jk.firebasestorage.app",
-  "messagingSenderId": "52260581312",
+  "storageBucket": "audio-c60da.firebasestorage.app",
+  "messagingSenderId": "172723095952",
   "measurementId": "",
-  "oAuthClientId": "52260581312-e4sfhe095au0qgj1j8krkjk8poj3574p.apps.googleusercontent.com",
+  "oAuthClientId": "172723095952-fhs5e37rrhs6c6lfg3jcgm3jrofnd3ts.apps.googleusercontent.com",
   "recaptchaSiteKey": ""
 }

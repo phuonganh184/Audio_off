@@ -53,12 +53,14 @@ import {
   deletePlaylistLocal,
   deleteStoryLocal,
   enqueueSync,
+  exportBackupData,
   getAllPlaylists,
   getAllProgress,
   getAllStories,
   getChapterContent,
   getStorageStats,
   getSyncQueue,
+  importBackupData,
   putChapterContent,
   putPlaylist,
   putProgress,
@@ -803,8 +805,88 @@ export default function App() {
     };
   }, []);
 
+  // Natural chapter title sorting helper (e.g., Chương 1 -> Chương 2 -> Chương 3 -> Chương 10)
+  const extractChapterOrderKey = (title: string): { hasNumber: boolean; num: number; subNum: number } => {
+    const normalized = title.trim();
+    const chapterMatch = normalized.match(
+      /(?:chương|chuong|chapter|chap|ch\.?)\s*[:#-]?\s*(\d+)(?:\s*[.\-:]\s*(\d+))?/i
+    );
+    if (chapterMatch) {
+      return {
+        hasNumber: true,
+        num: Number(chapterMatch[1]),
+        subNum: chapterMatch[2] ? Number(chapterMatch[2]) : 0,
+      };
+    }
+    const sectionMatch = normalized.match(
+      /(?:hồi|hoi|tập|tap|quyển|quyen|phần|phan)\s*[:#-]?\s*(\d+)(?:\s*[.\-:]\s*(\d+))?/i
+    );
+    if (sectionMatch) {
+      return {
+        hasNumber: true,
+        num: Number(sectionMatch[1]),
+        subNum: sectionMatch[2] ? Number(sectionMatch[2]) : 0,
+      };
+    }
+    const leadingMatch = normalized.match(/^(\d+)(?:\s*[.\-:]\s*(\d+))?(?:\b|\s|$)/);
+    if (leadingMatch) {
+      return {
+        hasNumber: true,
+        num: Number(leadingMatch[1]),
+        subNum: leadingMatch[2] ? Number(leadingMatch[2]) : 0,
+      };
+    }
+    const anyMatch = normalized.match(/(\d+)/);
+    if (anyMatch) {
+      return {
+        hasNumber: true,
+        num: Number(anyMatch[1]),
+        subNum: 0,
+      };
+    }
+    return { hasNumber: false, num: Number.MAX_SAFE_INTEGER, subNum: 0 };
+  };
+
+  const compareChapterSummaries = (a: ChapterSummary, b: ChapterSummary): number => {
+    const ka = extractChapterOrderKey(a.title);
+    const kb = extractChapterOrderKey(b.title);
+    if (ka.hasNumber !== kb.hasNumber) return ka.hasNumber ? -1 : 1;
+    if (ka.num !== kb.num) return ka.num - kb.num;
+    if (ka.subNum !== kb.subNum) return ka.subNum - kb.subNum;
+    return a.title.localeCompare(b.title, 'vi', { numeric: true, sensitivity: 'base' });
+  };
+
+  const syncStoryOrEnqueue = async (updated: Story) => {
+    if (user && user.emailVerified && isOnline) {
+      try {
+        await ensureUserProfile(user, { theme, speechRate: rate, preferredVoice: selectedVoiceName });
+        await pushStoryAndChapters(user.uid, updated);
+        await putStory({ ...updated, syncedAt: Date.now() });
+      } catch {
+        await enqueueSync({
+          id: `st_${updated.id}`,
+          kind: 'story',
+          targetId: updated.id,
+          createdAt: Date.now(),
+        });
+      }
+    } else if (user && user.emailVerified) {
+      await enqueueSync({
+        id: `st_${updated.id}`,
+        kind: 'story',
+        targetId: updated.id,
+        createdAt: Date.now(),
+      });
+    }
+  };
+
   // Story CRUD & Offline Download handlers
-  const handleCreateStory = async (title: string, author: string, coverFile?: File) => {
+  const handleCreateStory = async (
+    title: string,
+    author: string,
+    genre: string,
+    coverFile?: File
+  ) => {
     const now = Date.now();
     let cover: string | undefined;
     if (coverFile) {
@@ -814,37 +896,19 @@ export default function App() {
         toast(err instanceof Error ? err.message : 'Không xử lý được ảnh bìa');
       }
     }
+    const cleanGenre = genre.trim() ? nfc(genre.trim()).slice(0, 55) : '';
     const newStory: Story = {
       id: sanitizeId('story'),
       title: nfc(title).slice(0, 195),
       ...(author ? { author: nfc(author).slice(0, 115) } : {}),
+      ...(cleanGenre ? { genre: cleanGenre } : {}),
       ...(cover ? { cover } : {}),
       chapters: [],
       createdAt: now,
       updatedAt: now,
     };
     await putStory(newStory);
-    if (user && user.emailVerified && isOnline) {
-      try {
-        await ensureUserProfile(user, { theme, speechRate: rate, preferredVoice: selectedVoiceName });
-        await pushStoryAndChapters(user.uid, newStory);
-        await putStory({ ...newStory, syncedAt: Date.now() });
-      } catch {
-        await enqueueSync({
-          id: `st_${newStory.id}`,
-          kind: 'story',
-          targetId: newStory.id,
-          createdAt: Date.now(),
-        });
-      }
-    } else if (user && user.emailVerified) {
-      await enqueueSync({
-        id: `st_${newStory.id}`,
-        kind: 'story',
-        targetId: newStory.id,
-        createdAt: Date.now(),
-      });
-    }
+    await syncStoryOrEnqueue(newStory);
     await refreshLocalData();
     setSelectedStoryId(newStory.id);
     toast('Đã tạo truyện mới');
@@ -940,21 +1004,164 @@ export default function App() {
       const cover = await processCoverImage(file);
       const updated: Story = { ...st, cover, updatedAt: Date.now() };
       await putStory(updated);
-      if (user && user.emailVerified && isOnline) {
-        await pushStoryAndChapters(user.uid, updated);
-      } else if (user && user.emailVerified) {
-        await enqueueSync({
-          id: `st_${updated.id}`,
-          kind: 'story',
-          targetId: updated.id,
-          createdAt: Date.now(),
-        });
-      }
+      await syncStoryOrEnqueue(updated);
       await refreshLocalData();
       toast('Đã cập nhật ảnh bìa');
     } catch (err) {
       toast(err instanceof Error ? err.message : 'Không cập nhật được ảnh bìa');
     }
+  };
+
+  const handleUpdateGenre = async (storyId: string, genre: string) => {
+    const st = stories.find((s) => s.id === storyId);
+    if (!st) return;
+    const cleanGenre = genre.trim() ? nfc(genre.trim()).slice(0, 55) : undefined;
+    const updated: Story = {
+      ...st,
+      updatedAt: Date.now(),
+    };
+    if (cleanGenre) {
+      updated.genre = cleanGenre;
+    } else {
+      delete updated.genre;
+    }
+    await putStory(updated);
+    await syncStoryOrEnqueue(updated);
+    await refreshLocalData();
+    toast(cleanGenre ? `Đã đổi thể loại thành “${cleanGenre}”` : 'Đã bỏ phân loại thể loại');
+  };
+
+  const handleRenameChapter = async (storyId: string, chapterIndex: number, newTitle: string) => {
+    const st = stories.find((s) => s.id === storyId);
+    if (!st) return;
+    const target = st.chapters[chapterIndex];
+    if (!target) return;
+    const cleanTitle = nfc(newTitle.trim()).slice(0, 195);
+    if (!cleanTitle) return;
+
+    const now = Date.now();
+    const nextChapters = st.chapters.map((c, idx) =>
+      idx === chapterIndex ? { ...c, title: cleanTitle, updatedAt: now } : c
+    );
+    const localCh = await getChapterContent(target.id);
+    if (localCh) {
+      await putChapterContent({ ...localCh, title: cleanTitle, updatedAt: now });
+    }
+    const updated: Story = { ...st, chapters: nextChapters, updatedAt: now };
+    await putStory(updated);
+
+    if (activeStoryId === storyId && activeChapterIndex === chapterIndex) {
+      setActiveChapterContent((prev) =>
+        prev && prev.id === target.id ? { ...prev, title: cleanTitle, updatedAt: now } : prev
+      );
+    }
+
+    const existingProg = progressMap[storyId];
+    if (existingProg && existingProg.chapterIndex === chapterIndex) {
+      const updatedProg: ListeningProgress = {
+        ...existingProg,
+        chapterTitle: cleanTitle,
+        updatedAt: now,
+      };
+      await putProgress(updatedProg);
+      if (user && user.emailVerified && isOnline) {
+        pushProgressToCloud(user.uid, updatedProg).catch(() => {});
+      }
+    }
+
+    await syncStoryOrEnqueue(updated);
+    await refreshLocalData();
+    toast('Đã đổi tên chương');
+  };
+
+  const persistReorderedChapters = async (story: Story, reordered: ChapterSummary[]) => {
+    const now = Date.now();
+    const prevActiveId =
+      activeStoryId === story.id && activeChapterIndex !== null
+        ? story.chapters[activeChapterIndex]?.id
+        : undefined;
+    const prevProg = progressMap[story.id];
+    const prevProgChapterId = prevProg ? story.chapters[prevProg.chapterIndex]?.id : undefined;
+
+    const indexedChapters: ChapterSummary[] = reordered.map((c, idx) => ({
+      ...c,
+      index: idx,
+      updatedAt: c.index !== idx ? now : c.updatedAt,
+    }));
+
+    for (const ch of indexedChapters) {
+      const localCh = await getChapterContent(ch.id);
+      if (localCh && localCh.index !== ch.index) {
+        await putChapterContent({ ...localCh, index: ch.index, updatedAt: now });
+      }
+    }
+
+    const updatedStory: Story = { ...story, chapters: indexedChapters, updatedAt: now };
+    await putStory(updatedStory);
+
+    if (prevActiveId) {
+      const newActiveIdx = indexedChapters.findIndex((c) => c.id === prevActiveId);
+      if (newActiveIdx >= 0) {
+        setActiveChapterIndex(newActiveIdx);
+        setActiveChapterContent((prev) =>
+          prev && prev.id === prevActiveId ? { ...prev, index: newActiveIdx } : prev
+        );
+      }
+    }
+
+    if (prevProg && prevProgChapterId) {
+      const newProgIdx = indexedChapters.findIndex((c) => c.id === prevProgChapterId);
+      if (newProgIdx >= 0 && newProgIdx !== prevProg.chapterIndex) {
+        const updatedProg: ListeningProgress = {
+          ...prevProg,
+          chapterIndex: newProgIdx,
+          chapterTitle: indexedChapters[newProgIdx].title,
+          updatedAt: now,
+        };
+        await putProgress(updatedProg);
+        if (user && user.emailVerified && isOnline) {
+          pushProgressToCloud(user.uid, updatedProg).catch(() => {});
+        } else if (user && user.emailVerified) {
+          await enqueueSync({
+            id: `prog_${story.id}`,
+            kind: 'progress',
+            targetId: story.id,
+            createdAt: now,
+          });
+        }
+      }
+    }
+
+    await syncStoryOrEnqueue(updatedStory);
+    await refreshLocalData();
+  };
+
+  const handleMoveChapter = async (
+    storyId: string,
+    chapterIndex: number,
+    direction: -1 | 1
+  ) => {
+    const st = stories.find((s) => s.id === storyId);
+    if (!st) return;
+    const targetIdx = chapterIndex + direction;
+    if (targetIdx < 0 || targetIdx >= st.chapters.length) return;
+    const next = [...st.chapters];
+    const [moved] = next.splice(chapterIndex, 1);
+    next.splice(targetIdx, 0, moved);
+    await persistReorderedChapters(st, next);
+  };
+
+  const handleAutoSortChapters = async (storyId: string) => {
+    const st = stories.find((s) => s.id === storyId);
+    if (!st || st.chapters.length < 2) return;
+    const sorted = [...st.chapters].sort(compareChapterSummaries);
+    const unchanged = sorted.every((c, idx) => c.id === st.chapters[idx]?.id);
+    if (unchanged) {
+      toast('Danh sách chương đã đúng thứ tự 1 → 2 → 3');
+      return;
+    }
+    await persistReorderedChapters(st, sorted);
+    toast('Đã sắp xếp lại theo thứ tự chương');
   };
 
   const handleDeleteStory = (storyId: string) => {
@@ -1250,7 +1457,7 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen flex flex-col md:flex-row bg-[#f6f5f1] dark:bg-[#111318] text-slate-900 dark:text-slate-100">
+    <div className="min-h-screen overflow-x-hidden flex flex-col md:flex-row bg-[#f6f5f1] dark:bg-[#111318] text-slate-900 dark:text-slate-100">
       {/* Desktop Left Sidebar */}
       <aside className="hidden md:flex md:w-64 md:flex-col md:fixed md:inset-y-0 border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-[#161920] px-4 py-6 justify-between z-30">
         <div className="space-y-6">
@@ -1301,34 +1508,38 @@ export default function App() {
       </aside>
 
       {/* Mobile Compact Sticky Top Bar */}
-      <header className="md:hidden sticky top-0 z-30 h-14 pt-safe px-4 border-b border-slate-200 dark:border-slate-800 bg-white/90 dark:bg-[#161920]/90 backdrop-blur-md flex items-center justify-between gap-3">
-        <div
-          onClick={() => {
-            setTab('library');
-            setSelectedStoryId(null);
-            setIsReaderOpen(false);
-          }}
-          className="flex items-center gap-2.5 min-w-0 cursor-pointer"
-        >
-          <img src="/icon.svg" alt="Truyện Audio" className="w-7 h-7 rounded-lg shrink-0" />
-          <span className="text-base font-bold tracking-tight truncate">Truyện Audio</span>
-        </div>
-        <div className="flex items-center gap-2 shrink-0">
-          <PWAInstallButton compact />
-          <button
-            onClick={quickToggleDark}
-            aria-label="Đổi chế độ sáng tối"
-            className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-200 cursor-pointer"
+      <header className="md:hidden sticky top-0 z-30 pt-safe border-b border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-[#161920]/95 backdrop-blur-md">
+        <div className="h-14 px-4 flex items-center justify-between gap-3">
+          <div
+            onClick={() => {
+              setTab('library');
+              setSelectedStoryId(null);
+              setIsReaderOpen(false);
+            }}
+            className="flex items-center gap-2.5 min-w-0 cursor-pointer"
           >
-            {theme === 'dark' ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
-          </button>
+            <img src="/icon.svg" alt="Truyện Audio" className="w-7 h-7 rounded-lg shrink-0" />
+            <span className="text-base font-bold tracking-tight truncate">Truyện Audio</span>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <PWAInstallButton compact />
+            <button
+              onClick={quickToggleDark}
+              aria-label="Đổi chế độ sáng tối"
+              className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-200 cursor-pointer"
+            >
+              {theme === 'dark' ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
+            </button>
+          </div>
         </div>
       </header>
 
       {/* Main Content Area */}
       <main
         className={`flex-1 md:pl-64 min-w-0 ${
-          activeStory && activeChapterContent && !isReaderOpen ? 'pb-36 md:pb-24' : 'pb-24 md:pb-12'
+          activeStory && activeChapterContent && !isReaderOpen
+            ? 'pb-[calc(9.5rem+env(safe-area-inset-bottom,0px))] md:pb-24'
+            : 'pb-[calc(5.75rem+env(safe-area-inset-bottom,0px))] md:pb-12'
         }`}
       >
         <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-5 sm:py-8">
@@ -1443,6 +1654,12 @@ export default function App() {
               onPlayChapter={(chIdx) => openChapter(selectedStory.id, chIdx, true, { mode: 'story' })}
               onAddChapters={(files) => handleAddChapters(selectedStory.id, files)}
               onUpdateCover={(f) => handleUpdateCover(selectedStory.id, f)}
+              onUpdateGenre={(genre) => handleUpdateGenre(selectedStory.id, genre)}
+              onRenameChapter={(chIdx, title) =>
+                handleRenameChapter(selectedStory.id, chIdx, title)
+              }
+              onMoveChapter={(chIdx, dir) => handleMoveChapter(selectedStory.id, chIdx, dir)}
+              onAutoSortChapters={() => handleAutoSortChapters(selectedStory.id)}
               onDeleteChapter={(chIdx) => handleDeleteChapter(selectedStory.id, chIdx)}
               onDeleteStory={() => handleDeleteStory(selectedStory.id)}
               onDownloadAllOffline={() => handleDownloadStoryOffline(selectedStory.id)}
@@ -1546,11 +1763,29 @@ export default function App() {
                 try {
                   await signInWithPopup(auth, googleProvider);
                   toast('Đăng nhập Google thành công');
-                } catch (err) {
-                  toast(
-                    err instanceof Error
-                      ? `Không đăng nhập được: ${err.message}`
-                      : 'Đăng nhập bị hủy'
+                } catch (err: unknown) {
+                  const code = (err as { code?: string })?.code || '';
+                  if (code === 'auth/unauthorized-domain') {
+                    const host = typeof window !== 'undefined' ? window.location.hostname : '';
+                    throw new Error(
+                      `Tên miền “${host}” chưa được cấp quyền trong Firebase Console (dự án audio-c60da → Authentication → Settings → Authorized domains → Add domain).`
+                    );
+                  }
+                  if (code === 'auth/operation-not-allowed') {
+                    throw new Error(
+                      'Bạn chưa bật Google Sign-In trong Firebase Console của dự án audio-c60da (Authentication → Sign-in method).'
+                    );
+                  }
+                  if (code === 'auth/popup-blocked') {
+                    throw new Error(
+                      'Trình duyệt đang chặn cửa sổ bật lên (popup). Hãy cho phép popup rồi thử lại.'
+                    );
+                  }
+                  if (code === 'auth/popup-closed-by-user') {
+                    throw new Error('Bạn đã đóng cửa sổ đăng nhập Google trước khi hoàn tất.');
+                  }
+                  throw new Error(
+                    err instanceof Error ? `Không đăng nhập được: ${err.message}` : 'Đăng nhập bị hủy.'
                   );
                 }
               }}
@@ -1565,10 +1800,14 @@ export default function App() {
                 } catch (err: unknown) {
                   const code = (err as { code?: string })?.code || '';
                   if (code === 'auth/operation-not-allowed') {
-                    throw new Error('Chưa bật phương thức Email/Mật khẩu trong Firebase Console.');
+                    throw new Error(
+                      'Bạn chưa bật công tắc Email/Password trong Firebase Console của dự án audio-c60da (Authentication → Sign-in method).'
+                    );
                   }
                   if (code === 'auth/invalid-credential' || code === 'auth/wrong-password' || code === 'auth/user-not-found') {
-                    throw new Error('Email hoặc mật khẩu không đúng.');
+                    throw new Error(
+                      'Email hoặc mật khẩu không đúng. Nếu chưa có tài khoản, hãy chuyển sang tab "Đăng ký mới" (hoặc bấm "Quên mật khẩu?" nếu từng đăng nhập Google trên Web).'
+                    );
                   }
                   if (code === 'auth/too-many-requests') {
                     throw new Error('Thử sai quá nhiều lần, vui lòng đợi vài phút.');
@@ -1584,10 +1823,12 @@ export default function App() {
                 } catch (err: unknown) {
                   const code = (err as { code?: string })?.code || '';
                   if (code === 'auth/operation-not-allowed') {
-                    throw new Error('Chưa bật phương thức Email/Mật khẩu trong Firebase Console.');
+                    throw new Error(
+                      'Bạn chưa bật công tắc Email/Password trong Firebase Console của dự án audio-c60da (Authentication → Sign-in method).'
+                    );
                   }
                   if (code === 'auth/email-already-in-use') {
-                    throw new Error('Email này đã được đăng ký, hãy chuyển sang tab Đăng nhập.');
+                    throw new Error('Email này đã được đăng ký, hãy chuyển sang tab Đăng nhập (hoặc bấm Quên mật khẩu? nếu từng dùng Google).');
                   }
                   if (code === 'auth/weak-password') {
                     throw new Error('Mật khẩu cần tối thiểu 6 ký tự.');
@@ -1635,6 +1876,32 @@ export default function App() {
                 toast('Đã đăng xuất');
               }}
               onSyncNow={() => handleSyncNow()}
+              onExportBackup={async () => {
+                const bundle = await exportBackupData();
+                const blob = new Blob([JSON.stringify(bundle)], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                const dateStr = new Date().toISOString().slice(0, 10);
+                a.href = url;
+                a.download = `truyen-audio-backup-${dateStr}.json`;
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                URL.revokeObjectURL(url);
+                toast(`Đã xuất ${bundle.stories.length} truyện & ${bundle.chapters.length} chương`);
+              }}
+              onImportBackup={async (file) => {
+                try {
+                  const text = await file.text();
+                  const res = await importBackupData(text);
+                  await refreshLocalData();
+                  toast(
+                    `Đã nhập ${res.storiesImported} truyện, ${res.chaptersImported} chương, ${res.playlistsImported} danh sách phát`
+                  );
+                } catch (err) {
+                  toast(err instanceof Error ? err.message : 'Không đọc được file sao lưu');
+                }
+              }}
             />
           )}
         </div>
@@ -1654,30 +1921,32 @@ export default function App() {
       )}
 
       {/* Mobile Fixed Bottom Navigation Bar */}
-      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-30 h-16 pb-safe border-t border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-[#161920]/95 backdrop-blur-md grid grid-cols-4 items-center">
-        {navItems.map(({ id, label, Icon }) => {
-          const active = tab === id && !isReaderOpen;
-          return (
-            <button
-              key={id}
-              onClick={() => {
-                setTab(id);
-                setIsReaderOpen(false);
-                if (id !== 'library') setSelectedStoryId(null);
-              }}
-              className={`min-h-[48px] flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
-                active
-                  ? 'text-blue-600 dark:text-blue-400'
-                  : 'text-slate-500 dark:text-slate-400'
-              }`}
-            >
-              <Icon className="w-5 h-5" />
-              <span className="text-[10px] font-medium tracking-tight truncate max-w-[76px]">
-                {label}
-              </span>
-            </button>
-          );
-        })}
+      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-30 pb-safe border-t border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-[#161920]/95 backdrop-blur-md">
+        <div className="h-16 grid grid-cols-4 items-center">
+          {navItems.map(({ id, label, Icon }) => {
+            const active = tab === id && !isReaderOpen;
+            return (
+              <button
+                key={id}
+                onClick={() => {
+                  setTab(id);
+                  setIsReaderOpen(false);
+                  if (id !== 'library') setSelectedStoryId(null);
+                }}
+                className={`min-h-[48px] flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
+                  active
+                    ? 'text-blue-600 dark:text-blue-400'
+                    : 'text-slate-500 dark:text-slate-400'
+                }`}
+              >
+                <Icon className="w-5 h-5" />
+                <span className="text-[10px] font-medium tracking-tight truncate max-w-[76px]">
+                  {label}
+                </span>
+              </button>
+            );
+          })}
+        </div>
       </nav>
 
       {/* Add to Playlist Modal */}
@@ -1718,7 +1987,7 @@ export default function App() {
 
       {/* Confirmation Dialog */}
       {confirmState && (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm p-4 pb-[calc(1rem+env(safe-area-inset-bottom,0px))] sm:p-4">
           <div className="w-full max-w-sm rounded-2xl bg-white dark:bg-[#1a1d24] border border-slate-200 dark:border-slate-800 p-6 shadow-xl space-y-4">
             <p className="text-sm text-slate-800 dark:text-slate-200 leading-relaxed">
               {confirmState.message}
@@ -1747,7 +2016,7 @@ export default function App() {
 
       {/* Toast Notification */}
       {toastMsg && (
-        <div className="fixed left-1/2 -translate-x-1/2 top-16 md:top-6 z-50 max-w-[90vw] px-4 py-2.5 rounded-xl bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900 text-xs sm:text-sm font-medium shadow-lg">
+        <div className="fixed left-1/2 -translate-x-1/2 top-[calc(4.25rem+env(safe-area-inset-top,0px))] md:top-6 z-50 max-w-[90vw] px-4 py-2.5 rounded-xl bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900 text-xs sm:text-sm font-medium shadow-lg text-center">
           {toastMsg}
         </div>
       )}

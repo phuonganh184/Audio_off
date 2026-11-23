@@ -116,22 +116,22 @@ export const ReaderPlayerView: React.FC<Props> = ({
   return (
     <div className="space-y-5 pb-10">
       {/* Top Bar */}
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex items-center justify-between gap-2">
         <button
           onClick={onBack}
-          className="min-h-[44px] inline-flex items-center gap-2 px-3 rounded-xl text-sm font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-200/70 dark:hover:bg-slate-800 cursor-pointer"
+          className="min-h-[44px] inline-flex items-center gap-1.5 px-2.5 sm:px-3 rounded-xl text-sm font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-200/70 dark:hover:bg-slate-800 shrink-0 cursor-pointer"
         >
           <ArrowLeft className="w-4 h-4" />
           <span>Quay lại</span>
         </button>
 
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-1.5 shrink-0">
           <div className="flex items-center rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#1a1d24] p-0.5">
             {(['sm', 'md', 'lg'] as const).map((sz, i) => (
               <button
                 key={sz}
                 onClick={() => setFontSize(sz)}
-                className={`min-h-[34px] px-2.5 rounded-lg text-xs font-semibold cursor-pointer ${
+                className={`min-h-[34px] px-2 sm:px-2.5 rounded-lg text-xs font-semibold cursor-pointer ${
                   fontSize === sz
                     ? 'bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900'
                     : 'text-slate-600 dark:text-slate-400'
@@ -143,14 +143,15 @@ export const ReaderPlayerView: React.FC<Props> = ({
           </div>
           <button
             onClick={() => setShowAudioOpts((v) => !v)}
-            className={`min-h-[40px] px-3 rounded-xl border text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer ${
+            className={`min-h-[40px] px-2.5 sm:px-3 rounded-xl border text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer ${
               showAudioOpts
                 ? 'border-blue-500 bg-blue-500/10 text-blue-600 dark:text-blue-400'
                 : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-[#1a1d24] text-slate-700 dark:text-slate-300'
             }`}
           >
-            <SlidersHorizontal className="w-4 h-4" />
-            <span>Tùy chỉnh phát</span>
+            <SlidersHorizontal className="w-4 h-4 shrink-0" />
+            <span className="sm:hidden">Tùy chỉnh</span>
+            <span className="hidden sm:inline">Tùy chỉnh phát</span>
           </button>
         </div>
       </div>
@@ -225,7 +226,7 @@ export const ReaderPlayerView: React.FC<Props> = ({
         </div>
 
         {/* Transport Controls */}
-        <div className="flex items-center justify-center gap-3 sm:gap-5">
+        <div className="flex items-center justify-center gap-2 sm:gap-5">
           <button
             onClick={onPrevChapter}
             title="Chương trước"

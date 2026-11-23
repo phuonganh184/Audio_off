@@ -239,3 +239,105 @@ export function formatBytes(bytes: number): string {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
+
+export interface BackupBundle {
+  version: 1;
+  exportedAt: number;
+  stories: Story[];
+  chapters: Array<Omit<ChapterContent, 'audioBlob'>>;
+  playlists: Playlist[];
+  progress: ListeningProgress[];
+}
+
+export async function exportBackupData(): Promise<BackupBundle> {
+  const [stories, allChapters, playlists, progressMap] = await Promise.all([
+    getAllStories(),
+    getAllChapters(),
+    getAllPlaylists(),
+    getAllProgress(),
+  ]);
+
+  const textChapters = allChapters
+    .filter((ch) => !ch.audioBlob && ch.text)
+    .map(({ audioBlob: _blob, ...rest }) => rest);
+
+  return {
+    version: 1,
+    exportedAt: Date.now(),
+    stories,
+    chapters: textChapters,
+    playlists,
+    progress: Object.values(progressMap),
+  };
+}
+
+export async function importBackupData(rawJson: string): Promise<{
+  storiesImported: number;
+  chaptersImported: number;
+  playlistsImported: number;
+}> {
+  const parsed = JSON.parse(rawJson) as Partial<BackupBundle>;
+  if (!parsed || !Array.isArray(parsed.stories)) {
+    throw new Error('File sao lưu không hợp lệ.');
+  }
+
+  const existingStories = new Map((await getAllStories()).map((s) => [s.id, s]));
+  const existingPlaylists = new Map((await getAllPlaylists()).map((p) => [p.id, p]));
+  const existingProgress = await getAllProgress();
+
+  let storiesImported = 0;
+  let chaptersImported = 0;
+  let playlistsImported = 0;
+
+  if (Array.isArray(parsed.chapters)) {
+    for (const ch of parsed.chapters) {
+      if (!ch?.id || !ch?.storyId || typeof ch.text !== 'string') continue;
+      await putChapterContent({
+        ...ch,
+        downloadedOffline: true,
+        sizeBytes: ch.sizeBytes || new Blob([ch.text]).size,
+      });
+      chaptersImported++;
+    }
+  }
+
+  for (const st of parsed.stories) {
+    if (!st?.id || !st?.title) continue;
+    const prev = existingStories.get(st.id);
+    if (!prev || st.updatedAt >= prev.updatedAt) {
+      await putStory({
+        ...st,
+        chapters: st.chapters.map((c) => {
+          const hasTextInBundle =
+            Array.isArray(parsed.chapters) && parsed.chapters.some((bc) => bc.id === c.id);
+          return hasTextInBundle ? { ...c, downloadedOffline: true } : c;
+        }),
+      });
+      storiesImported++;
+    }
+  }
+
+  if (Array.isArray(parsed.playlists)) {
+    for (const pl of parsed.playlists) {
+      if (!pl?.id || !pl?.name) continue;
+      const prev = existingPlaylists.get(pl.id);
+      if (!prev || pl.updatedAt >= prev.updatedAt) {
+        await putPlaylist(pl);
+        playlistsImported++;
+      }
+    }
+  }
+
+  if (Array.isArray(parsed.progress)) {
+    for (const pr of parsed.progress) {
+      if (!pr?.storyId) continue;
+      const prev = existingProgress[pr.storyId];
+      if (!prev || pr.updatedAt > prev.updatedAt) {
+        await putProgress(pr);
+      }
+    }
+  }
+
+  return { storiesImported, chaptersImported, playlistsImported };
+}
+

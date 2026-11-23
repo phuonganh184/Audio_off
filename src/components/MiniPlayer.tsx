@@ -23,7 +23,7 @@ export const MiniPlayer: React.FC<Props> = ({
   onNext,
 }) => {
   return (
-    <div className="fixed left-0 right-0 bottom-16 md:bottom-0 md:left-64 z-30 border-t border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-[#1a1d24]/95 backdrop-blur-md">
+    <div className="fixed left-0 right-0 bottom-[calc(4rem+env(safe-area-inset-bottom,0px))] md:bottom-0 md:left-64 z-30 border-t border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-[#1a1d24]/95 backdrop-blur-md">
       <div className="h-0.5 w-full bg-slate-200 dark:bg-slate-800">
         <div
           className="h-full bg-blue-600 transition-all duration-200"

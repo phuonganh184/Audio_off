@@ -15,10 +15,25 @@ export interface ChapterSummary {
   updatedAt: number;
 }
 
+export const STORY_GENRES = [
+  'Kinh dị',
+  'Tình cảm',
+  'Kiếm hiệp',
+  'Tiên hiệp',
+  'Ngôn tình',
+  'Trinh thám',
+  'Huyền huyễn',
+  'Đô thị',
+  'Khoa huyễn',
+  'Lịch sử',
+  'Khác',
+] as const;
+
 export interface Story {
   id: string;
   title: string;
   author?: string;
+  genre?: string;
   cover?: string;
   chapters: ChapterSummary[];
   createdAt: number;

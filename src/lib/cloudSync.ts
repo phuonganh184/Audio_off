@@ -86,6 +86,7 @@ export async function pushStoryAndChapters(uid: string, story: Story): Promise<v
       ownerId: uid,
       title: story.title.slice(0, 200) || 'Không tiêu đề',
       ...(story.author ? { author: story.author.slice(0, 120) } : {}),
+      ...(story.genre !== undefined ? { genre: story.genre.slice(0, 60) } : {}),
       ...(story.cover && story.cover.length <= 245000 ? { cover: story.cover } : {}),
       chapterCount: Math.min(10000, story.chapters.length),
     };
@@ -100,6 +101,7 @@ export async function pushStoryAndChapters(uid: string, story: Story): Promise<v
       await updateDoc(storyRef, {
         title: basePayload.title,
         ...(basePayload.author !== undefined ? { author: basePayload.author } : {}),
+        ...(basePayload.genre !== undefined ? { genre: basePayload.genre } : {}),
         ...(basePayload.cover !== undefined ? { cover: basePayload.cover } : {}),
         chapterCount: basePayload.chapterCount,
         updatedAt: serverTimestamp(),
@@ -110,6 +112,8 @@ export async function pushStoryAndChapters(uid: string, story: Story): Promise<v
   }
 
   const localChapters = await getStoryChapters(story.id);
+  const localChapterMap = new Map(localChapters.map((c) => [c.id, c]));
+
   for (const ch of localChapters) {
     const chId = validDocId(ch.id);
     const chPath = `users/${uid}/stories/${storyId}/chapters/${chId}`;
@@ -134,6 +138,26 @@ export async function pushStoryAndChapters(uid: string, story: Story): Promise<v
           title: ch.title.slice(0, 200) || `Chương ${ch.index + 1}`,
           text: safeText,
           charCount: safeText.length,
+          updatedAt: serverTimestamp(),
+        });
+      }
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, chPath);
+    }
+  }
+
+  // Also sync index & title changes for chapters that are cloud-only on this device
+  for (const chSum of story.chapters) {
+    if (localChapterMap.has(chSum.id)) continue;
+    const chId = validDocId(chSum.id);
+    const chPath = `users/${uid}/stories/${storyId}/chapters/${chId}`;
+    const chRef = doc(db, 'users', uid, 'stories', storyId, 'chapters', chId);
+    try {
+      const existingCh = await getDoc(chRef);
+      if (existingCh.exists()) {
+        await updateDoc(chRef, {
+          index: chSum.index,
+          title: chSum.title.slice(0, 200) || `Chương ${chSum.index + 1}`,
           updatedAt: serverTimestamp(),
         });
       }
@@ -418,6 +442,7 @@ export async function syncAllWithCloud(
       id: sData.id,
       title: sData.title,
       author: sData.author,
+      ...(sData.genre ? { genre: sData.genre } : {}),
       cover: sData.cover,
       chapters: summaries,
       createdAt: sData.createdAt?.toMillis ? sData.createdAt.toMillis() : Date.now(),
