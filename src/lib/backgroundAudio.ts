@@ -6,8 +6,8 @@ import type { AmbientMode } from '@/src/types';
  * the screen turns off or the user switches apps.
  */
 function createWavUrl(mode: AmbientMode): string {
-  const sampleRate = 8000;
-  const durationSec = mode === 'silent' ? 2 : 6;
+  const sampleRate = mode === 'silent' ? 8000 : 22050;
+  const durationSec = mode === 'silent' ? 2 : 8;
   const numSamples = sampleRate * durationSec;
   const buffer = new ArrayBuffer(44 + numSamples * 2);
   const view = new DataView(buffer);
@@ -32,7 +32,15 @@ function createWavUrl(mode: AmbientMode): string {
   writeStr(36, 'data');
   view.setUint32(40, numSamples * 2, true);
 
-  let lastOut = 0;
+  let b0 = 0;
+  let b1 = 0;
+  let b2 = 0;
+  let brown = 0;
+  let dropEnv = 0;
+  let prevWhite = 0;
+
+  // Precompute PCM buffer with smooth loop fade at edges for non-silent modes
+  const fadeSamples = Math.min(2048, Math.floor(numSamples / 10));
   for (let i = 0; i < numSamples; i++) {
     let sample = 0;
     if (mode === 'silent') {
@@ -40,13 +48,38 @@ function createWavUrl(mode: AmbientMode): string {
       sample = i % 800 === 0 ? 1 : 0;
     } else if (mode === 'brown') {
       const white = Math.random() * 2 - 1;
-      lastOut = (lastOut + 0.03 * white) / 1.03;
-      sample = Math.round(Math.max(-1, Math.min(1, lastOut * 2.2)) * 1800);
+      brown = (brown + 0.025 * white) / 1.025;
+      const edgeGain =
+        i < fadeSamples
+          ? i / fadeSamples
+          : i > numSamples - fadeSamples
+            ? (numSamples - i) / fadeSamples
+            : 1;
+      sample = Math.round(Math.max(-1, Math.min(1, brown * 2.8 * edgeGain)) * 12500);
     } else if (mode === 'rain') {
       const white = Math.random() * 2 - 1;
-      lastOut = lastOut * 0.72 + white * 0.28;
-      const drop = Math.random() > 0.996 ? (Math.random() * 2 - 1) * 0.45 : 0;
-      sample = Math.round(Math.max(-1, Math.min(1, (lastOut * 0.35 + drop))) * 2200);
+      // 3-pole pink noise approximation for steady soft rain hiss
+      b0 = 0.99765 * b0 + white * 0.099046;
+      b1 = 0.963 * b1 + white * 0.2965164;
+      b2 = 0.57 * b2 + white * 1.0526913;
+      const pink = (b0 + b1 + b2 + white * 0.1848) * 0.11;
+      // Gentle high-pass shimmer + random soft raindrop patters
+      const hiss = (white - prevWhite) * 0.08;
+      prevWhite = white;
+      if (Math.random() > 0.9985) {
+        dropEnv = 0.35 + Math.random() * 0.45;
+      } else {
+        dropEnv *= 0.985;
+      }
+      const droplet = dropEnv * (Math.random() * 2 - 1) * 0.35;
+      const edgeGain =
+        i < fadeSamples
+          ? i / fadeSamples
+          : i > numSamples - fadeSamples
+            ? (numSamples - i) / fadeSamples
+            : 1;
+      const mixed = (pink + hiss + droplet) * edgeGain;
+      sample = Math.round(Math.max(-1, Math.min(1, mixed)) * 13500);
     }
     view.setInt16(44 + i * 2, sample, true);
   }
@@ -57,9 +90,11 @@ function createWavUrl(mode: AmbientMode): string {
 
 class BackgroundAudioKeepAlive {
   private audioEl: HTMLAudioElement | null = null;
+  private loadedMode: AmbientMode | null = null;
   private currentMode: AmbientMode = 'silent';
   private cachedUrls: Partial<Record<AmbientMode, string>> = {};
   private wakeLock: WakeLockSentinel | null = null;
+  private previewTimer: number | null = null;
 
   private ensureAudioEl(): HTMLAudioElement {
     if (!this.audioEl) {
@@ -73,17 +108,28 @@ class BackgroundAudioKeepAlive {
     return this.audioEl;
   }
 
+  private clearPreviewTimer(): void {
+    if (this.previewTimer !== null) {
+      window.clearTimeout(this.previewTimer);
+      this.previewTimer = null;
+    }
+  }
+
   public async start(mode: AmbientMode): Promise<void> {
     if (typeof window === 'undefined') return;
+    this.clearPreviewTimer();
     const el = this.ensureAudioEl();
     if (!this.cachedUrls[mode]) {
       this.cachedUrls[mode] = createWavUrl(mode);
     }
-    if (this.currentMode !== mode || !el.src) {
-      this.currentMode = mode;
-      el.src = this.cachedUrls[mode]!;
+    const targetUrl = this.cachedUrls[mode]!;
+    if (this.loadedMode !== mode || el.src !== targetUrl) {
+      this.loadedMode = mode;
+      el.src = targetUrl;
+      el.load();
     }
-    el.volume = mode === 'silent' ? 0.015 : 0.28;
+    this.currentMode = mode;
+    el.volume = mode === 'silent' ? 0.015 : 0.45;
     try {
       await el.play();
     } catch {
@@ -92,6 +138,7 @@ class BackgroundAudioKeepAlive {
   }
 
   public stop(): void {
+    this.clearPreviewTimer();
     if (this.audioEl) {
       this.audioEl.pause();
     }
@@ -101,11 +148,28 @@ class BackgroundAudioKeepAlive {
     this.currentMode = mode;
     if (isPlaying) {
       await this.start(mode);
+      return;
     }
+    if (mode === 'silent') {
+      this.stop();
+      return;
+    }
+    // Play a gentle 2.5-second preview when user selects rain/brown while paused
+    await this.start(mode);
+    this.previewTimer = window.setTimeout(() => {
+      this.previewTimer = null;
+      if (this.audioEl) {
+        this.audioEl.pause();
+      }
+    }, 2500);
   }
 
   public getAudioElement(): HTMLAudioElement | null {
     return this.audioEl;
+  }
+
+  public getCurrentMode(): AmbientMode {
+    return this.currentMode;
   }
 
   public async setWakeLock(enabled: boolean): Promise<boolean> {

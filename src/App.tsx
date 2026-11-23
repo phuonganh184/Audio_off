@@ -45,6 +45,7 @@ import {
   updateMediaSession,
 } from '@/src/lib/backgroundAudio';
 import {
+  clearProfileSyncCache,
   deletePlaylistFromCloud,
   deleteStoryFromCloud,
   downloadChapterFromCloud,
@@ -53,8 +54,17 @@ import {
   pushProgressToCloud,
   pushStoryAndChapters,
   syncAllWithCloud,
+  type PushStoryOptions,
 } from '@/src/lib/cloudSync';
-import { auth, googleProvider, testConnection } from '@/src/lib/firebase';
+import {
+  auth,
+  clearFirestoreQuotaCooldown,
+  googleProvider,
+  isFirestoreQuotaCooldownActive,
+  isQuotaExceededError,
+  markFirestoreQuotaExceeded,
+  testConnection,
+} from '@/src/lib/firebase';
 import {
   clearAllOfflineChapters,
   deleteChapterContent,
@@ -100,6 +110,63 @@ import {
   type VoiceProfileId,
 } from '@/src/types';
 
+const FEMALE_VI_VOICE_RE =
+  /google.*vi|google tiếng việt|hoaimy|hoài my|linh|chi|my\b|nu\b|nữ|female|woman|mai\b|lan\b|huong|ngoc|trang|thao|vi-vn-x-gft|vi-vn-x-vif|vi-vn-x-vie/i;
+const MALE_VI_VOICE_RE =
+  /microsoft\s*an\b|namminh|nam minh|nam\b|minh\b|male|man\b|hung|hùng|tuan|tuấn|duy\b|hoang|phong|vi-vn-x-gfd|vi-vn-x-vim|vi-vn-x-vid/i;
+
+function pickVietnameseVoice(
+  availableVoices: SpeechSynthesisVoice[],
+  selectedVoiceName: string,
+  profileId: VoiceProfileId,
+  isOnline: boolean
+) {
+  const profile =
+    OFFLINE_VOICE_PROFILES.find((p) => p.id === profileId) || OFFLINE_VOICE_PROFILES[0];
+  const offlinePool = availableVoices.filter((v) => v.localService);
+  const pool = !isOnline && offlinePool.length > 0 ? offlinePool : availableVoices;
+
+  let chosen = selectedVoiceName
+    ? availableVoices.find((v) => v.name === selectedVoiceName)
+    : undefined;
+
+  if (chosen && !isOnline && !chosen.localService && offlinePool.length > 0) {
+    chosen = undefined;
+  }
+
+  let genderFallbackNotice: string | undefined;
+
+  if (!chosen && pool.length > 0) {
+    if (profile.preferredGender === 'female') {
+      chosen = pool.find((v) => FEMALE_VI_VOICE_RE.test(v.name));
+    } else if (profile.preferredGender === 'male') {
+      chosen = pool.find((v) => MALE_VI_VOICE_RE.test(v.name));
+    }
+    if (!chosen) {
+      chosen = pool[0];
+    }
+  }
+
+  if (
+    !selectedVoiceName &&
+    chosen &&
+    profile.preferredGender === 'female' &&
+    MALE_VI_VOICE_RE.test(chosen.name)
+  ) {
+    genderFallbackNotice = `Thiết bị/trình duyệt hiện chỉ có giọng nam (“${chosen.name}”), nên chọn giọng nữ vẫn đọc bằng giọng này kèm tăng cao độ. Để nghe đúng giọng nữ Tiếng Việt, hãy dùng Microsoft Edge hoặc bật mạng / cài thêm giọng nữ Tiếng Việt.`;
+  } else if (
+    !selectedVoiceName &&
+    chosen &&
+    profile.preferredGender === 'male' &&
+    FEMALE_VI_VOICE_RE.test(chosen.name) &&
+    !MALE_VI_VOICE_RE.test(chosen.name)
+  ) {
+    genderFallbackNotice = `Thiết bị/trình duyệt hiện chỉ có giọng nữ (“${chosen.name}”), nên chọn giọng nam vẫn đọc bằng giọng này kèm hạ cao độ.`;
+  }
+
+  return { profile, chosen, genderFallbackNotice };
+}
+
 export default function App() {
   const { theme, setTheme } = useTheme();
   const isOnline = useOnlineStatus();
@@ -124,8 +191,11 @@ export default function App() {
   const [, setAuthTick] = useState(0);
   const [authReady, setAuthReady] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [quotaExceeded, setQuotaExceeded] = useState(() => isFirestoreQuotaCooldownActive());
   const [syncStatusText, setSyncStatusText] = useState('');
   const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
+  const syncInFlightRef = useRef(false);
+  const wasOnlineRef = useRef(isOnline);
   const [deviceName, setDeviceName] = useState<string>(() => {
     try {
       return localStorage.getItem('truyen_audio_device') || getDeviceLabel();
@@ -297,7 +367,7 @@ export default function App() {
     const loadVoices = () => {
       const list = window.speechSynthesis.getVoices();
       if (!list.length) return;
-      const viVoices = list.filter((v) => /^vi/i.test(v.lang) || /viet/i.test(v.name));
+      const viVoices = list.filter((v) => /^vi/i.test(v.lang) || /viet|việt/i.test(v.name));
       const sorted = [
         ...viVoices.filter((v) => v.localService),
         ...viVoices.filter((v) => !v.localService),
@@ -344,22 +414,21 @@ export default function App() {
       setProgressMap((prev) => ({ ...prev, [storyId]: entry }));
 
       if (syncImmediately && userRef.current?.emailVerified) {
-        if (isOnlineRef.current) {
+        if (isOnlineRef.current && !isFirestoreQuotaCooldownActive()) {
           try {
-            await ensureUserProfile(userRef.current, {
-              theme,
-              speechRate: rateRef.current,
-              preferredVoice: selectedVoiceRef.current,
-            });
             await pushProgressToCloud(userRef.current.uid, entry);
-          } catch {
+          } catch (err) {
+            if (isQuotaExceededError(err)) {
+              setQuotaExceeded(true);
+            }
             await enqueueSync({
               id: `prog_${storyId}`,
               kind: 'progress',
               targetId: storyId,
               createdAt: Date.now(),
             });
-            setPendingSyncCount((c) => c + 1);
+            const sq = await getSyncQueue();
+            setPendingSyncCount(sq.length);
           }
         } else {
           await enqueueSync({
@@ -373,7 +442,7 @@ export default function App() {
         }
       }
     },
-    [theme]
+    []
   );
 
   // Stop Speech & Native Audio helpers
@@ -511,45 +580,44 @@ export default function App() {
     [pausePlayback, repeatEnabled, shuffleEnabled]
   );
 
-  const resolveVietnameseUtteranceSettings = useCallback(() => {
-    const profile =
-      OFFLINE_VOICE_PROFILES.find((p) => p.id === voiceProfileRef.current) ||
-      OFFLINE_VOICE_PROFILES[0];
+  const resolvedVoiceInfo = useMemo(() => {
+    const liveList =
+      voices.length > 0
+        ? voices
+        : 'speechSynthesis' in window
+          ? window.speechSynthesis
+              .getVoices()
+              .filter((v) => /^vi/i.test(v.lang) || /viet|việt/i.test(v.name))
+          : [];
+    const { chosen, genderFallbackNotice } = pickVietnameseVoice(
+      liveList,
+      selectedVoiceName,
+      voiceProfileId,
+      isOnline
+    );
+    if (!chosen) return null;
+    return {
+      name: chosen.name,
+      lang: chosen.lang,
+      localService: chosen.localService,
+      genderFallbackNotice,
+    };
+  }, [voices, selectedVoiceName, voiceProfileId, isOnline]);
 
+  const resolveVietnameseUtteranceSettings = useCallback(() => {
     const liveList =
       'speechSynthesis' in window
         ? window.speechSynthesis
             .getVoices()
-            .filter((v) => /^vi/i.test(v.lang) || /viet/i.test(v.name))
+            .filter((v) => /^vi/i.test(v.lang) || /viet|việt/i.test(v.name))
         : [];
     const available = voicesRef.current.length > 0 ? voicesRef.current : liveList;
-    const offlinePool = available.filter((v) => v.localService);
-    const pool = !isOnlineRef.current && offlinePool.length > 0 ? offlinePool : available;
-
-    let chosen = selectedVoiceRef.current
-      ? available.find((v) => v.name === selectedVoiceRef.current)
-      : undefined;
-
-    if (chosen && !isOnlineRef.current && !chosen.localService && offlinePool.length > 0) {
-      chosen = undefined;
-    }
-
-    if (!chosen && pool.length > 0) {
-      if (profile.preferredGender === 'female') {
-        chosen = pool.find((v) =>
-          /hoaimy|hoài my|linh|chi|my\b|nu\b|nữ|female|woman|mai\b|lan\b|huong|ngoc|trang|thao/i.test(
-            v.name
-          )
-        );
-      } else if (profile.preferredGender === 'male') {
-        chosen = pool.find((v) =>
-          /namminh|nam minh|nam\b|minh\b|male|man\b|hung|hùng|tuan|tuấn|duy\b|hoang|phong/i.test(
-            v.name
-          )
-        );
-      }
-      if (!chosen) chosen = pool[0];
-    }
+    const { profile, chosen } = pickVietnameseVoice(
+      available,
+      selectedVoiceRef.current,
+      voiceProfileRef.current,
+      isOnlineRef.current
+    );
 
     const effectiveRate = Math.min(
       2.5,
@@ -734,6 +802,14 @@ export default function App() {
       try {
         await resumeAndSyncEqualizer(nativeAudioRef.current, eqGainsRef.current);
         await nativeAudioRef.current.play();
+        if (ambientModeRef.current !== 'silent') {
+          await keepAliveEngine.start(ambientModeRef.current);
+          if (eqGainsRef.current.some((g) => g !== 0)) {
+            await resumeAndSyncEqualizer(keepAliveEngine.getAudioElement(), eqGainsRef.current);
+          }
+        } else {
+          keepAliveEngine.stop();
+        }
       } catch {
         toast('Nhấn lại nút Phát để trình duyệt kích hoạt âm thanh.');
         setIsPlaying(false);
@@ -742,7 +818,7 @@ export default function App() {
     }
 
     await keepAliveEngine.start(ambientModeRef.current);
-    if (ambientModeRef.current !== 'silent') {
+    if (ambientModeRef.current !== 'silent' && eqGainsRef.current.some((g) => g !== 0)) {
       await resumeAndSyncEqualizer(keepAliveEngine.getAudioElement(), eqGainsRef.current);
     }
     speakCurrentChunk(chunkIndexRef.current);
@@ -915,10 +991,17 @@ export default function App() {
         if (autoPlay) {
           setIsPlaying(true);
           playingRef.current = true;
-          keepAliveEngine.stop();
           try {
             await resumeAndSyncEqualizer(audio, eqGainsRef.current);
             await audio.play();
+            if (ambientModeRef.current !== 'silent') {
+              await keepAliveEngine.start(ambientModeRef.current);
+              if (eqGainsRef.current.some((g) => g !== 0)) {
+                await resumeAndSyncEqualizer(keepAliveEngine.getAudioElement(), eqGainsRef.current);
+              }
+            } else {
+              keepAliveEngine.stop();
+            }
           } catch {
             setIsPlaying(false);
           }
@@ -927,7 +1010,7 @@ export default function App() {
         setIsPlaying(true);
         playingRef.current = true;
         await keepAliveEngine.start(ambientModeRef.current);
-        if (ambientModeRef.current !== 'silent') {
+        if (ambientModeRef.current !== 'silent' && eqGainsRef.current.some((g) => g !== 0)) {
           await resumeAndSyncEqualizer(keepAliveEngine.getAudioElement(), eqGainsRef.current);
         }
         // Slight delay so state refs settle cleanly before uttering
@@ -969,9 +1052,18 @@ export default function App() {
 
   // Cloud Sync Handler
   const handleSyncNow = useCallback(
-    async (targetUser?: User) => {
+    async (targetUser?: User, manual = false) => {
       const u = targetUser || userRef.current;
-      if (!u || !u.emailVerified || !isOnlineRef.current || isSyncing) return;
+      if (!u || !u.emailVerified || !isOnlineRef.current || syncInFlightRef.current) return;
+      if (manual) {
+        clearFirestoreQuotaCooldown();
+        setQuotaExceeded(false);
+      } else if (isFirestoreQuotaCooldownActive()) {
+        setQuotaExceeded(true);
+        return;
+      }
+
+      syncInFlightRef.current = true;
       setIsSyncing(true);
       try {
         const res = await syncAllWithCloud(
@@ -984,6 +1076,7 @@ export default function App() {
           },
           (msg) => setSyncStatusText(msg)
         );
+        setQuotaExceeded(false);
         setLastSyncedAt(Date.now());
         setSyncStatusText(
           `Đã đồng bộ ${res.storiesCount} truyện · ${res.playlistsCount} danh sách phát`
@@ -993,35 +1086,57 @@ export default function App() {
           toast(`Đã cập nhật tiến trình nghe mới nhất từ thiết bị khác`);
         }
       } catch (err) {
-        const message = err instanceof Error ? err.message : 'Lỗi đồng bộ';
-        setSyncStatusText('Không đồng bộ được. Vui lòng thử lại.');
-        toast(`Lỗi đồng bộ: ${message.slice(0, 90)}`);
+        if (isQuotaExceededError(err)) {
+          markFirestoreQuotaExceeded();
+          setQuotaExceeded(true);
+          setSyncStatusText(
+            'Đã đạt hạn mức ghi Firestore miễn phí trong ngày. Dữ liệu vẫn được lưu trên máy và sẽ đồng bộ lại vào ngày mai.'
+          );
+          toast('Đã đạt giới hạn ghi dữ liệu đám mây hôm nay — app tiếp tục chạy ngoại tuyến an toàn');
+        } else {
+          const message = err instanceof Error ? err.message : 'Lỗi đồng bộ';
+          setSyncStatusText('Không đồng bộ được. Vui lòng thử lại.');
+          toast(`Lỗi đồng bộ: ${message.slice(0, 90)}`);
+        }
       } finally {
+        syncInFlightRef.current = false;
         setIsSyncing(false);
       }
     },
-    [isSyncing, refreshLocalData, theme, toast]
+    [refreshLocalData, theme, toast]
   );
 
   // Firebase Auth listener
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
+      if (!u) {
+        clearProfileSyncCache();
+      }
       setUser(u);
       setAuthReady(true);
-      if (u && u.emailVerified && isOnlineRef.current) {
-        handleSyncNow(u);
+      if (u && u.emailVerified && isOnlineRef.current && !isFirestoreQuotaCooldownActive()) {
+        handleSyncNow(u, false);
       }
     });
     return () => unsub();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Auto-flush offline queue when network returns
+  // Auto-flush offline queue ONLY on offline -> online reconnect transition (never loop on error)
   useEffect(() => {
-    if (isOnline && user && user.emailVerified && pendingSyncCount > 0 && !isSyncing) {
-      handleSyncNow(user);
+    const cameOnline = !wasOnlineRef.current && isOnline;
+    wasOnlineRef.current = isOnline;
+    if (
+      cameOnline &&
+      user &&
+      user.emailVerified &&
+      pendingSyncCount > 0 &&
+      !syncInFlightRef.current &&
+      !isFirestoreQuotaCooldownActive()
+    ) {
+      handleSyncNow(user, false);
     }
-  }, [isOnline, user, pendingSyncCount, isSyncing, handleSyncNow]);
+  }, [isOnline, user, pendingSyncCount, handleSyncNow]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -1034,9 +1149,33 @@ export default function App() {
     };
   }, []);
 
-  // Natural chapter title sorting helper (e.g., Chương 1 -> Chương 2 -> Chương 3 -> Chương 10)
+  // Natural chapter title sorting helper (e.g., Văn án -> Chương 1 -> Chương 2 -> ... -> Ngoại truyện)
   const extractChapterOrderKey = (title: string): { hasNumber: boolean; num: number; subNum: number } => {
     const normalized = title.trim();
+    if (
+      /^(?:văn\s*án|van\s*an|mở\s*đầu|mo\s*dau|lời\s*nói\s*đầu|lời\s*tựa|loi\s*tua|tựa\b|giới\s*thiệu|gioi\s*thieu|dẫn\s*nhập|tiền\s*truyện|prologue)\b/i.test(
+        normalized
+      )
+    ) {
+      const sub = normalized.match(/(\d+)/);
+      return {
+        hasNumber: true,
+        num: -1000,
+        subNum: sub ? Number(sub[1]) : 0,
+      };
+    }
+    if (
+      /^(?:ngoại\s*truyện|ngoai\s*truyen|phiên\s*ngoại|phien\s*ngoai|vĩ\s*thanh|vi\s*thanh|lời\s*kết|loi\s*ket|hậu\s*truyện|epilogue)\b/i.test(
+        normalized
+      )
+    ) {
+      const sub = normalized.match(/(\d+)/);
+      return {
+        hasNumber: true,
+        num: 1_000_000_000,
+        subNum: sub ? Number(sub[1]) : 0,
+      };
+    }
     const chapterMatch = normalized.match(
       /(?:chương|chuong|chapter|chap|ch\.?)\s*[:#-]?\s*(\d+)(?:\s*[.\-:]\s*(\d+))?/i
     );
@@ -1085,13 +1224,16 @@ export default function App() {
     return a.title.localeCompare(b.title, 'vi', { numeric: true, sensitivity: 'base' });
   };
 
-  const syncStoryOrEnqueue = async (updated: Story) => {
-    if (user && user.emailVerified && isOnline) {
+  const syncStoryOrEnqueue = async (updated: Story, options: PushStoryOptions = {}) => {
+    if (user && user.emailVerified && isOnline && !isFirestoreQuotaCooldownActive()) {
       try {
         await ensureUserProfile(user, { theme, speechRate: rate, preferredVoice: selectedVoiceName });
-        await pushStoryAndChapters(user.uid, updated);
+        await pushStoryAndChapters(user.uid, updated, options);
         await putStory({ ...updated, syncedAt: Date.now() });
-      } catch {
+      } catch (err) {
+        if (isQuotaExceededError(err)) {
+          setQuotaExceeded(true);
+        }
         await enqueueSync({
           id: `st_${updated.id}`,
           kind: 'story',
@@ -1195,12 +1337,17 @@ export default function App() {
         updatedAt: Date.now(),
       };
       await putStory(updated);
-      if (user && user.emailVerified && isOnline) {
+      if (user && user.emailVerified && isOnline && !isFirestoreQuotaCooldownActive()) {
         try {
           await ensureUserProfile(user, { theme, speechRate: rate, preferredVoice: selectedVoiceName });
-          await pushStoryAndChapters(user.uid, updated);
+          await pushStoryAndChapters(user.uid, updated, {
+            changedChapterIds: addedSummaries.map((c) => c.id),
+          });
           await putStory({ ...updated, syncedAt: Date.now() });
-        } catch {
+        } catch (err) {
+          if (isQuotaExceededError(err)) {
+            setQuotaExceeded(true);
+          }
           await enqueueSync({
             id: `st_${updated.id}`,
             kind: 'story',
@@ -1233,7 +1380,7 @@ export default function App() {
       const cover = await processCoverImage(file);
       const updated: Story = { ...st, cover, updatedAt: Date.now() };
       await putStory(updated);
-      await syncStoryOrEnqueue(updated);
+      await syncStoryOrEnqueue(updated, { metadataOnly: true });
       await refreshLocalData();
       toast('Đã cập nhật ảnh bìa');
     } catch (err) {
@@ -1255,7 +1402,7 @@ export default function App() {
       delete updated.genre;
     }
     await putStory(updated);
-    await syncStoryOrEnqueue(updated);
+    await syncStoryOrEnqueue(updated, { metadataOnly: true });
     await refreshLocalData();
     toast(cleanGenre ? `Đã đổi thể loại thành “${cleanGenre}”` : 'Đã bỏ phân loại thể loại');
   };
@@ -1293,12 +1440,14 @@ export default function App() {
         updatedAt: now,
       };
       await putProgress(updatedProg);
-      if (user && user.emailVerified && isOnline) {
-        pushProgressToCloud(user.uid, updatedProg).catch(() => {});
+      if (user && user.emailVerified && isOnline && !isFirestoreQuotaCooldownActive()) {
+        pushProgressToCloud(user.uid, updatedProg).catch((err) => {
+          if (isQuotaExceededError(err)) setQuotaExceeded(true);
+        });
       }
     }
 
-    await syncStoryOrEnqueue(updated);
+    await syncStoryOrEnqueue(updated, { changedChapterIds: [target.id] });
     await refreshLocalData();
     toast('Đã đổi tên chương');
   };
@@ -1348,8 +1497,10 @@ export default function App() {
           updatedAt: now,
         };
         await putProgress(updatedProg);
-        if (user && user.emailVerified && isOnline) {
-          pushProgressToCloud(user.uid, updatedProg).catch(() => {});
+        if (user && user.emailVerified && isOnline && !isFirestoreQuotaCooldownActive()) {
+          pushProgressToCloud(user.uid, updatedProg).catch((err) => {
+            if (isQuotaExceededError(err)) setQuotaExceeded(true);
+          });
         } else if (user && user.emailVerified) {
           await enqueueSync({
             id: `prog_${story.id}`,
@@ -1361,23 +1512,25 @@ export default function App() {
       }
     }
 
-    await syncStoryOrEnqueue(updatedStory);
+    const changedIds = indexedChapters
+      .filter((c, i) => story.chapters[i]?.id !== c.id || c.updatedAt === now)
+      .map((c) => c.id);
+    await syncStoryOrEnqueue(updatedStory, { changedChapterIds: changedIds });
     await refreshLocalData();
   };
 
-  const handleMoveChapter = async (
-    storyId: string,
-    chapterIndex: number,
-    direction: -1 | 1
-  ) => {
+  const handleReorderChapters = async (storyId: string, orderedChapterIds: string[]) => {
     const st = stories.find((s) => s.id === storyId);
     if (!st) return;
-    const targetIdx = chapterIndex + direction;
-    if (targetIdx < 0 || targetIdx >= st.chapters.length) return;
-    const next = [...st.chapters];
-    const [moved] = next.splice(chapterIndex, 1);
-    next.splice(targetIdx, 0, moved);
-    await persistReorderedChapters(st, next);
+    const chMap = new Map(st.chapters.map((c) => [c.id, c]));
+    const reordered = orderedChapterIds
+      .map((id) => chMap.get(id))
+      .filter((c): c is ChapterSummary => !!c);
+    if (reordered.length !== st.chapters.length) return;
+    const unchanged = reordered.every((c, idx) => c.id === st.chapters[idx]?.id);
+    if (unchanged) return;
+    await persistReorderedChapters(st, reordered);
+    toast('Đã lưu thứ tự chương mới');
   };
 
   const handleAutoSortChapters = async (storyId: string) => {
@@ -1408,10 +1561,11 @@ export default function App() {
         }
         await deleteStoryLocal(storyId);
         if (selectedStoryId === storyId) setSelectedStoryId(null);
-        if (user && user.emailVerified && isOnline) {
+        if (user && user.emailVerified && isOnline && !isFirestoreQuotaCooldownActive()) {
           try {
             await deleteStoryFromCloud(user.uid, storyId);
-          } catch {
+          } catch (err) {
+            if (isQuotaExceededError(err)) setQuotaExceeded(true);
             await enqueueSync({
               id: `del_st_${storyId}`,
               kind: 'delete_story',
@@ -1453,9 +1607,9 @@ export default function App() {
           .map((c, idx) => ({ ...c, index: idx }));
         const updated: Story = { ...st, chapters: remaining, updatedAt: Date.now() };
         await putStory(updated);
-        if (user && user.emailVerified && isOnline) {
-          await pushStoryAndChapters(user.uid, updated);
-        }
+        await syncStoryOrEnqueue(updated, {
+          changedChapterIds: remaining.slice(chapterIndex).map((c) => c.id),
+        });
         await refreshLocalData();
         toast('Đã xóa chương');
       },
@@ -1545,11 +1699,12 @@ export default function App() {
       updatedAt: now,
     };
     await putPlaylist(pl);
-    if (user && user.emailVerified && isOnline) {
+    if (user && user.emailVerified && isOnline && !isFirestoreQuotaCooldownActive()) {
       try {
         await ensureUserProfile(user, { theme, speechRate: rate, preferredVoice: selectedVoiceName });
         await pushPlaylistToCloud(user.uid, pl);
-      } catch {
+      } catch (err) {
+        if (isQuotaExceededError(err)) setQuotaExceeded(true);
         await enqueueSync({
           id: `pl_${pl.id}`,
           kind: 'playlist',
@@ -1571,10 +1726,11 @@ export default function App() {
 
   const handleUpdatePlaylist = async (pl: Playlist) => {
     await putPlaylist(pl);
-    if (user && user.emailVerified && isOnline) {
+    if (user && user.emailVerified && isOnline && !isFirestoreQuotaCooldownActive()) {
       try {
         await pushPlaylistToCloud(user.uid, pl);
-      } catch {
+      } catch (err) {
+        if (isQuotaExceededError(err)) setQuotaExceeded(true);
         await enqueueSync({
           id: `pl_${pl.id}`,
           kind: 'playlist',
@@ -1595,10 +1751,11 @@ export default function App() {
 
   const handleDeletePlaylist = async (playlistId: string) => {
     await deletePlaylistLocal(playlistId);
-    if (user && user.emailVerified && isOnline) {
+    if (user && user.emailVerified && isOnline && !isFirestoreQuotaCooldownActive()) {
       try {
         await deletePlaylistFromCloud(user.uid, playlistId);
-      } catch {
+      } catch (err) {
+        if (isQuotaExceededError(err)) setQuotaExceeded(true);
         await enqueueSync({
           id: `del_pl_${playlistId}`,
           kind: 'delete_playlist',
@@ -1800,7 +1957,8 @@ export default function App() {
           <OfflineBanner
             pendingSyncCount={pendingSyncCount}
             isSyncing={isSyncing}
-            onSyncNow={() => handleSyncNow()}
+            quotaExceeded={quotaExceeded}
+            onSyncNow={() => handleSyncNow(undefined, true)}
           />
 
           {isReaderOpen && activeStory && activeChapterContent ? (
@@ -1817,6 +1975,7 @@ export default function App() {
               voices={voices}
               selectedVoiceName={selectedVoiceName}
               voiceProfileId={voiceProfileId}
+              resolvedVoiceInfo={resolvedVoiceInfo}
               eqPreset={eqState.preset}
               eqGains={eqState.gains}
               rate={rate}
@@ -1893,26 +2052,38 @@ export default function App() {
                 eqGainsRef.current = next.gains;
                 saveEqState(next);
                 updateEqualizerGainsOnAudio(nativeAudioRef.current, next.gains);
-                updateEqualizerGainsOnAudio(keepAliveEngine.getAudioElement(), next.gains);
+                const ambientEl = keepAliveEngine.getAudioElement();
+                if (ambientEl && ambientModeRef.current !== 'silent') {
+                  if (next.gains.some((g) => g !== 0)) {
+                    void resumeAndSyncEqualizer(ambientEl, next.gains);
+                  } else {
+                    updateEqualizerGainsOnAudio(ambientEl, next.gains);
+                  }
+                }
               }}
               onChangeEqBand={(bandIdx, db) => {
                 const clamped = Math.max(-12, Math.min(12, Math.round(db)));
-                setEqState((prev) => {
-                  const nextGains = [...prev.gains] as EqGains;
-                  nextGains[bandIdx] = clamped;
-                  const matched = EQ_PRESETS.find((p) =>
-                    p.gains.every((v, i) => v === nextGains[i])
-                  );
-                  const next: EqState = {
-                    preset: matched ? matched.id : 'custom',
-                    gains: nextGains,
-                  };
-                  eqGainsRef.current = nextGains;
-                  saveEqState(next);
-                  updateEqualizerGainsOnAudio(nativeAudioRef.current, nextGains);
-                  updateEqualizerGainsOnAudio(keepAliveEngine.getAudioElement(), nextGains);
-                  return next;
-                });
+                const nextGains = [...eqGainsRef.current] as EqGains;
+                nextGains[bandIdx] = clamped;
+                const matched = EQ_PRESETS.find((p) =>
+                  p.gains.every((v, i) => v === nextGains[i])
+                );
+                const next: EqState = {
+                  preset: matched ? matched.id : 'custom',
+                  gains: nextGains,
+                };
+                setEqState(next);
+                eqGainsRef.current = nextGains;
+                saveEqState(next);
+                updateEqualizerGainsOnAudio(nativeAudioRef.current, nextGains);
+                const ambientEl = keepAliveEngine.getAudioElement();
+                if (ambientEl && ambientModeRef.current !== 'silent') {
+                  if (nextGains.some((g) => g !== 0)) {
+                    void resumeAndSyncEqualizer(ambientEl, nextGains);
+                  } else {
+                    updateEqualizerGainsOnAudio(ambientEl, nextGains);
+                  }
+                }
               }}
               onChangeRate={(r) => {
                 setRate(r);
@@ -1943,9 +2114,11 @@ export default function App() {
                 try {
                   localStorage.setItem('truyen_audio_ambient', mode);
                 } catch {}
-                await keepAliveEngine.setMode(mode, isPlaying && !activeChapterContent.audioBlob);
-                if (mode !== 'silent' && isPlaying && !activeChapterContent.audioBlob) {
+                await keepAliveEngine.setMode(mode, isPlaying);
+                if (mode !== 'silent' && eqGainsRef.current.some((g) => g !== 0)) {
                   await resumeAndSyncEqualizer(keepAliveEngine.getAudioElement(), eqGainsRef.current);
+                } else {
+                  updateEqualizerGainsOnAudio(keepAliveEngine.getAudioElement(), eqGainsRef.current);
                 }
               }}
               onToggleWakeLock={async () => {
@@ -2009,7 +2182,9 @@ export default function App() {
               onRenameChapter={(chIdx, title) =>
                 handleRenameChapter(selectedStory.id, chIdx, title)
               }
-              onMoveChapter={(chIdx, dir) => handleMoveChapter(selectedStory.id, chIdx, dir)}
+              onReorderChapters={(orderedIds) =>
+                handleReorderChapters(selectedStory.id, orderedIds)
+              }
               onAutoSortChapters={() => handleAutoSortChapters(selectedStory.id)}
               onDeleteChapter={(chIdx) => handleDeleteChapter(selectedStory.id, chIdx)}
               onDeleteStory={() => handleDeleteStory(selectedStory.id)}
@@ -2226,7 +2401,7 @@ export default function App() {
                 setAuthTick((n) => n + 1);
                 if (refreshed?.emailVerified) {
                   toast('Email đã xác minh! Đang đồng bộ dữ liệu…');
-                  await handleSyncNow(refreshed);
+                  await handleSyncNow(refreshed, true);
                 } else {
                   toast('Email vẫn chưa được xác minh. Hãy bấm link trong hộp thư của bạn.');
                 }
@@ -2235,7 +2410,7 @@ export default function App() {
                 await signOut(auth);
                 toast('Đã đăng xuất');
               }}
-              onSyncNow={() => handleSyncNow()}
+              onSyncNow={() => handleSyncNow(undefined, true)}
               onExportBackup={async () => {
                 const bundle = await exportBackupData();
                 const blob = new Blob([JSON.stringify(bundle)], { type: 'application/json' });

@@ -42,10 +42,24 @@ function validDocId(id: string): string {
   return id.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 120) || `id_${Date.now()}`;
 }
 
+const ensuredProfileKeyByUid = new Map<string, string>();
+
+export function clearProfileSyncCache(): void {
+  ensuredProfileKeyByUid.clear();
+}
+
 export async function ensureUserProfile(
   user: User,
   prefs: { theme: ThemeMode; speechRate: number; preferredVoice?: string }
 ): Promise<void> {
+  const displayName = (user.displayName || user.email || 'Người nghe').slice(0, 120);
+  const speechRate = Math.min(3, Math.max(0.5, prefs.speechRate || 1));
+  const preferredVoice = (prefs.preferredVoice || '').slice(0, 160);
+  const cacheKey = `${displayName}|${prefs.theme}|${speechRate}|${preferredVoice}`;
+  if (ensuredProfileKeyByUid.get(user.uid) === cacheKey) {
+    return;
+  }
+
   const path = `users/${user.uid}`;
   const ref = doc(db, 'users', user.uid);
   try {
@@ -53,28 +67,46 @@ export async function ensureUserProfile(
     if (!snap.exists()) {
       await setDoc(ref, {
         uid: user.uid,
-        displayName: (user.displayName || user.email || 'Người nghe').slice(0, 120),
+        displayName,
         theme: prefs.theme,
-        speechRate: Math.min(3, Math.max(0.5, prefs.speechRate || 1)),
-        preferredVoice: (prefs.preferredVoice || '').slice(0, 160),
+        speechRate,
+        preferredVoice,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
     } else {
-      await updateDoc(ref, {
-        displayName: (user.displayName || user.email || 'Người nghe').slice(0, 120),
-        theme: prefs.theme,
-        speechRate: Math.min(3, Math.max(0.5, prefs.speechRate || 1)),
-        preferredVoice: (prefs.preferredVoice || '').slice(0, 160),
-        updatedAt: serverTimestamp(),
-      });
+      const data = snap.data();
+      const unchanged =
+        data.displayName === displayName &&
+        data.theme === prefs.theme &&
+        data.speechRate === speechRate &&
+        (data.preferredVoice || '') === preferredVoice;
+      if (!unchanged) {
+        await updateDoc(ref, {
+          displayName,
+          theme: prefs.theme,
+          speechRate,
+          preferredVoice,
+          updatedAt: serverTimestamp(),
+        });
+      }
     }
+    ensuredProfileKeyByUid.set(user.uid, cacheKey);
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
   }
 }
 
-export async function pushStoryAndChapters(uid: string, story: Story): Promise<void> {
+export interface PushStoryOptions {
+  metadataOnly?: boolean;
+  changedChapterIds?: string[];
+}
+
+export async function pushStoryAndChapters(
+  uid: string,
+  story: Story,
+  options: PushStoryOptions = {}
+): Promise<void> {
   const storyId = validDocId(story.id);
   const storyPath = `users/${uid}/stories/${storyId}`;
   const storyRef = doc(db, 'users', uid, 'stories', storyId);
@@ -98,26 +130,42 @@ export async function pushStoryAndChapters(uid: string, story: Story): Promise<v
         updatedAt: serverTimestamp(),
       });
     } else {
-      await updateDoc(storyRef, {
-        title: basePayload.title,
-        ...(basePayload.author !== undefined ? { author: basePayload.author } : {}),
-        ...(basePayload.genre !== undefined ? { genre: basePayload.genre } : {}),
-        ...(basePayload.cover !== undefined ? { cover: basePayload.cover } : {}),
-        chapterCount: basePayload.chapterCount,
-        updatedAt: serverTimestamp(),
-      });
+      const ex = existing.data();
+      const unchanged =
+        ex.title === basePayload.title &&
+        (ex.author || undefined) === basePayload.author &&
+        (ex.genre || undefined) === basePayload.genre &&
+        (ex.cover || undefined) === basePayload.cover &&
+        ex.chapterCount === basePayload.chapterCount;
+      if (!unchanged) {
+        await updateDoc(storyRef, {
+          title: basePayload.title,
+          ...(basePayload.author !== undefined ? { author: basePayload.author } : {}),
+          ...(basePayload.genre !== undefined ? { genre: basePayload.genre } : {}),
+          ...(basePayload.cover !== undefined ? { cover: basePayload.cover } : {}),
+          chapterCount: basePayload.chapterCount,
+          updatedAt: serverTimestamp(),
+        });
+      }
     }
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, storyPath);
   }
 
+  if (options.metadataOnly) {
+    return;
+  }
+
+  const changedSet = options.changedChapterIds ? new Set(options.changedChapterIds) : null;
   const localChapters = await getStoryChapters(story.id);
   const localChapterMap = new Map(localChapters.map((c) => [c.id, c]));
 
   for (const ch of localChapters) {
+    if (changedSet && !changedSet.has(ch.id)) continue;
     const chId = validDocId(ch.id);
     const chPath = `users/${uid}/stories/${storyId}/chapters/${chId}`;
     const chRef = doc(db, 'users', uid, 'stories', storyId, 'chapters', chId);
+    const safeTitle = ch.title.slice(0, 200) || `Chương ${ch.index + 1}`;
     const safeText = ch.text.slice(0, 595000) || ' ';
     try {
       const existingCh = await getDoc(chRef);
@@ -127,19 +175,28 @@ export async function pushStoryAndChapters(uid: string, story: Story): Promise<v
           ownerId: uid,
           storyId,
           index: ch.index,
-          title: ch.title.slice(0, 200) || `Chương ${ch.index + 1}`,
+          title: safeTitle,
           text: safeText,
           charCount: safeText.length,
           updatedAt: serverTimestamp(),
         });
       } else {
-        await updateDoc(chRef, {
-          index: ch.index,
-          title: ch.title.slice(0, 200) || `Chương ${ch.index + 1}`,
-          text: safeText,
-          charCount: safeText.length,
-          updatedAt: serverTimestamp(),
-        });
+        const ex = existingCh.data();
+        const exUpdatedMs = ex.updatedAt?.toMillis ? ex.updatedAt.toMillis() : 0;
+        const unchanged =
+          ex.index === ch.index &&
+          ex.title === safeTitle &&
+          ex.charCount === safeText.length &&
+          exUpdatedMs >= ch.updatedAt;
+        if (!unchanged) {
+          await updateDoc(chRef, {
+            index: ch.index,
+            title: safeTitle,
+            text: safeText,
+            charCount: safeText.length,
+            updatedAt: serverTimestamp(),
+          });
+        }
       }
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, chPath);
@@ -149,17 +206,22 @@ export async function pushStoryAndChapters(uid: string, story: Story): Promise<v
   // Also sync index & title changes for chapters that are cloud-only on this device
   for (const chSum of story.chapters) {
     if (localChapterMap.has(chSum.id)) continue;
+    if (changedSet && !changedSet.has(chSum.id)) continue;
     const chId = validDocId(chSum.id);
     const chPath = `users/${uid}/stories/${storyId}/chapters/${chId}`;
     const chRef = doc(db, 'users', uid, 'stories', storyId, 'chapters', chId);
+    const safeTitle = chSum.title.slice(0, 200) || `Chương ${chSum.index + 1}`;
     try {
       const existingCh = await getDoc(chRef);
       if (existingCh.exists()) {
-        await updateDoc(chRef, {
-          index: chSum.index,
-          title: chSum.title.slice(0, 200) || `Chương ${chSum.index + 1}`,
-          updatedAt: serverTimestamp(),
-        });
+        const ex = existingCh.data();
+        if (ex.index !== chSum.index || ex.title !== safeTitle) {
+          await updateDoc(chRef, {
+            index: chSum.index,
+            title: safeTitle,
+            updatedAt: serverTimestamp(),
+          });
+        }
       }
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, chPath);
@@ -367,14 +429,18 @@ export async function syncAllWithCloud(
   let cloudPlaylistsSnap = await getPlaylistsSnap();
 
   const cloudPlaylistIds = new Set(cloudPlaylistsSnap.docs.map((d) => d.id));
+  let pushedNewPlaylist = false;
   for (const pl of localPlaylists) {
     if (!cloudPlaylistIds.has(validDocId(pl.id))) {
       await pushPlaylistToCloud(uid, pl);
+      pushedNewPlaylist = true;
     }
   }
 
-  // Re-fetch cloud playlists & merge (newest updatedAt wins)
-  cloudPlaylistsSnap = await getPlaylistsSnap();
+  // Re-fetch only if we pushed a newly created local playlist
+  if (pushedNewPlaylist) {
+    cloudPlaylistsSnap = await getPlaylistsSnap();
+  }
 
   for (const d of cloudPlaylistsSnap.docs) {
     const data = d.data();
@@ -389,7 +455,7 @@ export async function syncAllWithCloud(
         createdAt: data.createdAt?.toMillis ? data.createdAt.toMillis() : Date.now(),
         updatedAt: cloudTime,
       });
-    } else {
+    } else if (localPl.updatedAt > cloudTime + 5000) {
       await pushPlaylistToCloud(uid, localPl);
     }
   }
@@ -486,7 +552,12 @@ export async function syncAllWithCloud(
     if (!lProg || cProg.updatedAt > lProg.updatedAt) {
       await putProgress(cProg);
       progressUpdated++;
-    } else if (lProg.updatedAt > cProg.updatedAt) {
+    } else if (
+      lProg.updatedAt > cProg.updatedAt + 5000 &&
+      (lProg.chapterIndex !== cProg.chapterIndex ||
+        lProg.chunkIndex !== cProg.chunkIndex ||
+        Math.abs((lProg.audioTime || 0) - (cProg.audioTime || 0)) > 2)
+    ) {
       await pushProgressToCloud(uid, lProg);
     }
   }

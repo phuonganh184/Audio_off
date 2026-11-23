@@ -10,6 +10,7 @@ import {
   Play,
   RotateCcw,
   RotateCw,
+  ScrollText,
   SkipBack,
   SkipForward,
   SlidersHorizontal,
@@ -45,6 +46,12 @@ interface Props {
   voices: SpeechSynthesisVoice[];
   selectedVoiceName: string;
   voiceProfileId: VoiceProfileId;
+  resolvedVoiceInfo?: {
+    name: string;
+    lang: string;
+    localService: boolean;
+    genderFallbackNotice?: string;
+  } | null;
   eqPreset: EqPresetId;
   eqGains: EqGains;
   rate: number;
@@ -95,6 +102,7 @@ export const ReaderPlayerView: React.FC<Props> = ({
   voices,
   selectedVoiceName,
   voiceProfileId,
+  resolvedVoiceInfo,
   eqPreset,
   eqGains,
   rate,
@@ -124,13 +132,132 @@ export const ReaderPlayerView: React.FC<Props> = ({
 }) => {
   const [fontSize, setFontSize] = useState<'sm' | 'md' | 'lg'>('md');
   const [drawerTab, setDrawerTab] = useState<'none' | 'settings' | 'eq'>('none');
-  const activeSpanRef = useRef<HTMLSpanElement | null>(null);
+  const [handsFreeMode, setHandsFreeMode] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('truyen_audio_hands_free') === 'true';
+    } catch {
+      return false;
+    }
+  });
+  const [handsFreeSpeed, setHandsFreeSpeed] = useState<number>(() => {
+    try {
+      const saved = Number(localStorage.getItem('truyen_audio_hands_free_speed'));
+      return [0.5, 1, 1.5, 2].includes(saved) ? saved : 1;
+    } catch {
+      return 1;
+    }
+  });
+  const [handsFreePaused, setHandsFreePaused] = useState(false);
+  const [scrollProgressPercent, setScrollProgressPercent] = useState(0);
 
+  const activeSpanRef = useRef<HTMLSpanElement | null>(null);
+  const proseCardRef = useRef<HTMLDivElement | null>(null);
+  const manualScrollPauseUntilRef = useRef<number>(0);
+
+  const toggleHandsFreeMode = () => {
+    setHandsFreeMode((prev) => {
+      const next = !prev;
+      setHandsFreePaused(false);
+      try {
+        localStorage.setItem('truyen_audio_hands_free', String(next));
+      } catch {}
+      return next;
+    });
+  };
+
+  const updateHandsFreeSpeed = (speed: number) => {
+    setHandsFreeSpeed(speed);
+    setHandsFreePaused(false);
+    try {
+      localStorage.setItem('truyen_audio_hands_free_speed', String(speed));
+    } catch {}
+  };
+
+  // Track chapter scroll reading progress (0% - 100%)
   useEffect(() => {
-    if (activeSpanRef.current) {
+    const updateScrollProgress = () => {
+      const el = proseCardRef.current;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      const docTop = window.scrollY + rect.top;
+      const proseHeight = el.offsetHeight;
+      const bottomBuffer = 220; // account for pinned bottom player dock
+      const readableDistance = Math.max(1, proseHeight - (window.innerHeight - bottomBuffer));
+      if (proseHeight <= window.innerHeight - bottomBuffer) {
+        setScrollProgressPercent(100);
+        return;
+      }
+      const scrolled = Math.max(0, window.scrollY - docTop + 80);
+      const pct = Math.min(100, Math.max(0, Math.round((scrolled / readableDistance) * 100)));
+      setScrollProgressPercent(pct);
+    };
+
+    updateScrollProgress();
+    window.addEventListener('scroll', updateScrollProgress, { passive: true });
+    window.addEventListener('resize', updateScrollProgress, { passive: true });
+    return () => {
+      window.removeEventListener('scroll', updateScrollProgress);
+      window.removeEventListener('resize', updateScrollProgress);
+    };
+  }, [chapter.id, fontSize, chunks.length]);
+
+  // Keep active TTS chunk visible when playing TTS (respecting manual browsing when handsFreeMode is off)
+  useEffect(() => {
+    if (!isNativeAudio && isPlaying && activeSpanRef.current) {
       activeSpanRef.current.scrollIntoView({ block: 'center', behavior: 'smooth' });
     }
-  }, [chunkIndex, chapter.id]);
+  }, [chunkIndex, chapter.id, isNativeAudio, isPlaying]);
+
+  // Continuous hands-free auto-scroll loop (works alongside native MP3/M4A audio or silent reading)
+  useEffect(() => {
+    if (!handsFreeMode || handsFreePaused) return;
+    // When TTS is actively playing, activeSpanRef scrollIntoView keeps text synced automatically
+    if (!isNativeAudio && isPlaying) return;
+
+    const pauseOnUserInput = () => {
+      manualScrollPauseUntilRef.current = Date.now() + 2200;
+    };
+    window.addEventListener('wheel', pauseOnUserInput, { passive: true });
+    window.addEventListener('touchstart', pauseOnUserInput, { passive: true });
+
+    let rafId = 0;
+    let lastTs = performance.now();
+    let carry = 0;
+
+    const step = (now: number) => {
+      const dt = Math.min(0.1, (now - lastTs) / 1000);
+      lastTs = now;
+
+      if (Date.now() > manualScrollPauseUntilRef.current) {
+        const el = proseCardRef.current;
+        if (el) {
+          const rect = el.getBoundingClientRect();
+          const maxScrollY = Math.max(
+            0,
+            window.scrollY + rect.top + el.offsetHeight - (window.innerHeight - 200)
+          );
+          if (window.scrollY < maxScrollY) {
+            const pxPerSec = 30 * handsFreeSpeed;
+            carry += pxPerSec * dt;
+            if (carry >= 1) {
+              const px = Math.floor(carry);
+              carry -= px;
+              window.scrollBy(0, px);
+            }
+          }
+        }
+      }
+
+      rafId = window.requestAnimationFrame(step);
+    };
+
+    rafId = window.requestAnimationFrame(step);
+    return () => {
+      window.cancelAnimationFrame(rafId);
+      window.removeEventListener('wheel', pauseOnUserInput);
+      window.removeEventListener('touchstart', pauseOnUserInput);
+    };
+  }, [handsFreeMode, handsFreePaused, handsFreeSpeed, isNativeAudio, isPlaying]);
 
   const paragraphs = useMemo(() => {
     const groups: { pIdx: number; items: { idx: number; text: string }[] }[] = [];
@@ -170,7 +297,23 @@ export const ReaderPlayerView: React.FC<Props> = ({
           <span>Quay lại</span>
         </button>
 
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0 flex-wrap justify-end">
+          <button
+            type="button"
+            onClick={toggleHandsFreeMode}
+            aria-pressed={handsFreeMode}
+            title="Chế độ đọc rảnh tay (tự động cuộn văn bản khi đọc/nghe song song)"
+            className={`min-h-[38px] px-2.5 sm:px-3 rounded-xl border text-xs font-semibold inline-flex items-center gap-1.5 transition cursor-pointer ${
+              handsFreeMode
+                ? 'bg-blue-600/15 border-blue-500/60 text-blue-700 dark:text-blue-300'
+                : 'bg-white dark:bg-[#1a1d24] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+            }`}
+          >
+            <ScrollText className="w-3.5 h-3.5 shrink-0" />
+            <span className="hidden sm:inline">Đọc rảnh tay</span>
+            <span className="sm:hidden">Rảnh tay</span>
+          </button>
+
           <button
             type="button"
             onClick={onToggleBlueLightFilter}
@@ -183,7 +326,7 @@ export const ReaderPlayerView: React.FC<Props> = ({
             }`}
           >
             <Eye className="w-3.5 h-3.5 shrink-0" />
-            <span className="hidden sm:inline">Chế độ lọc ánh sáng xanh</span>
+            <span className="hidden sm:inline">Lọc ánh sáng xanh</span>
             <span className="sm:hidden">Lọc mắt</span>
           </button>
 
@@ -192,7 +335,7 @@ export const ReaderPlayerView: React.FC<Props> = ({
               <button
                 key={sz}
                 onClick={() => setFontSize(sz)}
-                className={`min-h-[34px] px-2.5 rounded-lg text-xs font-semibold cursor-pointer ${
+                className={`min-h-[34px] px-2 sm:px-2.5 rounded-lg text-xs font-semibold cursor-pointer ${
                   fontSize === sz
                     ? 'bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900'
                     : 'text-slate-600 dark:text-slate-400'
@@ -232,8 +375,78 @@ export const ReaderPlayerView: React.FC<Props> = ({
         </div>
       </div>
 
+      {/* Sticky Chapter Reading Progress & Hands-Free Controls Bar */}
+      <div className="sticky top-[calc(3.75rem+env(safe-area-inset-top,0px))] md:top-3 z-20 rounded-2xl bg-white/95 dark:bg-[#1a1d24]/95 backdrop-blur-md border border-slate-200 dark:border-slate-800 px-3.5 py-2.5 shadow-sm space-y-2">
+        <div className="flex items-center justify-between gap-2 text-xs">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="font-semibold text-slate-700 dark:text-slate-200 truncate">
+              Tiến độ đọc chương
+            </span>
+            <span className="font-bold text-blue-600 dark:text-blue-400 tabular-nums shrink-0">
+              {scrollProgressPercent}%
+            </span>
+          </div>
+
+          {handsFreeMode && (
+            <div className="flex items-center gap-1 shrink-0">
+              {!isNativeAudio && isPlaying ? (
+                <span className="text-[11px] font-medium text-blue-600 dark:text-blue-400 px-2 py-0.5 rounded-lg bg-blue-500/10">
+                  Cuộn theo giọng đọc
+                </span>
+              ) : (
+                <>
+                  {([0.5, 1, 1.5, 2] as const).map((sp) => (
+                    <button
+                      key={sp}
+                      type="button"
+                      onClick={() => updateHandsFreeSpeed(sp)}
+                      className={`min-h-[26px] px-2 rounded-lg text-[11px] font-semibold tabular-nums cursor-pointer ${
+                        handsFreeSpeed === sp
+                          ? 'bg-blue-600 text-white'
+                          : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700'
+                      }`}
+                    >
+                      {sp}×
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => setHandsFreePaused((p) => !p)}
+                    aria-label={handsFreePaused ? 'Tiếp tục cuộn' : 'Tạm dừng cuộn'}
+                    className="min-h-[26px] min-w-[26px] flex items-center justify-center rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-700 cursor-pointer"
+                  >
+                    {handsFreePaused ? (
+                      <Play className="w-3 h-3" />
+                    ) : (
+                      <Pause className="w-3 h-3" />
+                    )}
+                  </button>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div
+          role="progressbar"
+          aria-valuenow={scrollProgressPercent}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-label="Thanh tiến độ đọc của chương"
+          className="h-1.5 w-full rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden"
+        >
+          <div
+            className="h-full rounded-full bg-blue-600 dark:bg-blue-500 transition-[width] duration-150"
+            style={{ width: `${scrollProgressPercent}%` }}
+          />
+        </div>
+      </div>
+
       {/* Synchronized Prose Area */}
-      <div className="rounded-2xl bg-white dark:bg-[#1a1d24] border border-slate-200 dark:border-slate-800 p-5 sm:p-8">
+      <div
+        ref={proseCardRef}
+        className="rounded-2xl bg-white dark:bg-[#1a1d24] border border-slate-200 dark:border-slate-800 p-5 sm:p-8"
+      >
         <div className={`font-serif text-slate-800 dark:text-slate-200 ${proseSizeClass}`}>
           {paragraphs.map((para) => (
             <p key={para.pIdx} className="mb-5 last:mb-0">
@@ -429,11 +642,25 @@ export const ReaderPlayerView: React.FC<Props> = ({
                       </select>
                       <ChevronDown className="w-4 h-4 text-slate-400 absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
                     </div>
-                    <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
-                      {voices.length <= 1 && (!voices[0] || !voices[0].localService)
-                        ? 'Trình duyệt hiện chỉ có 1 giọng Tiếng Việt trực tuyến (giọng này chỉ đổi được tốc độ, chưa hỗ trợ đổi cao độ trầm/bổng). Dùng Edge hoặc bật gói giọng Việt trên Windows/Android để nghe rõ các giọng AI.'
-                        : `Có ${voices.length} giọng Tiếng Việt trên thiết bị.`}
-                    </p>
+                    <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-1 space-y-0.5">
+                      {resolvedVoiceInfo && (
+                        <div className="font-medium text-slate-700 dark:text-slate-300 truncate">
+                          Đang đọc bằng: {resolvedVoiceInfo.name} (
+                          {resolvedVoiceInfo.localService ? 'Offline' : 'Trực tuyến'})
+                        </div>
+                      )}
+                      {resolvedVoiceInfo?.genderFallbackNotice ? (
+                        <div className="text-amber-600 dark:text-amber-400">
+                          {resolvedVoiceInfo.genderFallbackNotice}
+                        </div>
+                      ) : voices.length <= 1 && (!voices[0] || !voices[0].localService) ? (
+                        <div>
+                          Trình duyệt hiện chỉ có 1 giọng Tiếng Việt trực tuyến (có thể bỏ qua chỉnh trầm/bổng). Dùng Microsoft Edge hoặc cài gói giọng Việt ngoại tuyến để nghe rõ các giọng AI.
+                        </div>
+                      ) : (
+                        <div>Có {voices.length} giọng Tiếng Việt trên thiết bị.</div>
+                      )}
+                    </div>
                   </div>
                 </>
               )}
@@ -513,6 +740,33 @@ export const ReaderPlayerView: React.FC<Props> = ({
                   }`}
                 >
                   {autoPlayNext ? 'Đang bật' : 'Tắt'}
+                </button>
+              </div>
+
+              <div className="sm:col-span-2 flex items-center justify-between gap-3 rounded-xl bg-slate-50 dark:bg-[#111318] border border-slate-200 dark:border-slate-800 px-3.5 py-2.5">
+                <div className="flex items-center gap-2 text-slate-700 dark:text-slate-300 min-w-0">
+                  <ScrollText className="w-4 h-4 text-blue-500 shrink-0" />
+                  <div className="min-w-0">
+                    <div className="font-medium text-slate-800 dark:text-slate-200">
+                      Chế độ đọc rảnh tay
+                    </div>
+                    <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                      Tự động cuộn nội dung văn bản song song khi đọc & nghe audio
+                    </div>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={handsFreeMode}
+                  onClick={toggleHandsFreeMode}
+                  className={`min-h-[32px] px-3 rounded-lg font-semibold shrink-0 cursor-pointer transition-colors ${
+                    handsFreeMode
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
+                  }`}
+                >
+                  {handsFreeMode ? 'Đang bật' : 'Tắt'}
                 </button>
               </div>
 

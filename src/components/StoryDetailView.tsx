@@ -1,14 +1,17 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   ArrowDown,
+  ArrowDownToLine,
   ArrowLeft,
   ArrowUp,
   ArrowUpDown,
+  ArrowUpToLine,
   Check,
   CheckCircle2,
   CloudOff,
   Download,
   FilePlus2,
+  GripVertical,
   Headphones,
   Image as ImageIcon,
   ListPlus,
@@ -22,7 +25,7 @@ import {
 import { StoryCover } from '@/src/components/StoryCover';
 import { formatBytes } from '@/src/lib/localDb';
 import { estimateMinutes } from '@/src/lib/parsers';
-import { STORY_GENRES, type ListeningProgress, type Story } from '@/src/types';
+import { STORY_GENRES, type ChapterSummary, type ListeningProgress, type Story } from '@/src/types';
 
 interface Props {
   story: Story;
@@ -41,7 +44,7 @@ interface Props {
   onUpdateCover: (file: File) => Promise<void>;
   onUpdateGenre: (genre: string) => Promise<void>;
   onRenameChapter: (chapterIndex: number, newTitle: string) => Promise<void>;
-  onMoveChapter: (chapterIndex: number, direction: -1 | 1) => Promise<void>;
+  onReorderChapters: (orderedChapterIds: string[]) => Promise<void>;
   onAutoSortChapters: () => Promise<void>;
   onDeleteChapter: (chapterIndex: number) => void;
   onDeleteStory: () => void;
@@ -70,7 +73,7 @@ export const StoryDetailView: React.FC<Props> = ({
   onUpdateCover,
   onUpdateGenre,
   onRenameChapter,
-  onMoveChapter,
+  onReorderChapters,
   onAutoSortChapters,
   onDeleteChapter,
   onDeleteStory,
@@ -89,6 +92,70 @@ export const StoryDetailView: React.FC<Props> = ({
   const [editingTitle, setEditingTitle] = useState('');
   const [savingRename, setSavingRename] = useState(false);
   const [reorderMode, setReorderMode] = useState(false);
+  const [draftChapters, setDraftChapters] = useState<ChapterSummary[]>([]);
+  const [savingOrder, setSavingOrder] = useState(false);
+  const [dragIdx, setDragIdx] = useState<number | null>(null);
+  const [dropIdx, setDropIdx] = useState<number | null>(null);
+  const [posInputs, setPosInputs] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    setReorderMode(false);
+    setDraftChapters([]);
+    setDragIdx(null);
+    setDropIdx(null);
+    setPosInputs({});
+  }, [story.id]);
+
+  const enterReorderMode = () => {
+    setDraftChapters([...story.chapters]);
+    setPosInputs({});
+    setDragIdx(null);
+    setDropIdx(null);
+    setReorderMode(true);
+  };
+
+  const cancelReorderMode = () => {
+    setReorderMode(false);
+    setDraftChapters([]);
+    setPosInputs({});
+    setDragIdx(null);
+    setDropIdx(null);
+  };
+
+  const moveDraftItem = (fromIdx: number, toIdx: number) => {
+    setDraftChapters((prev) => {
+      if (fromIdx < 0 || fromIdx >= prev.length) return prev;
+      const clampedTo = Math.max(0, Math.min(prev.length - 1, toIdx));
+      if (fromIdx === clampedTo) return prev;
+      const next = [...prev];
+      const [moved] = next.splice(fromIdx, 1);
+      next.splice(clampedTo, 0, moved);
+      return next;
+    });
+    setPosInputs({});
+  };
+
+  const hasDraftChanges =
+    reorderMode &&
+    draftChapters.length === story.chapters.length &&
+    draftChapters.some((c, i) => c.id !== story.chapters[i]?.id);
+
+  const handleSaveOrder = async () => {
+    if (savingOrder) return;
+    if (!hasDraftChanges) {
+      cancelReorderMode();
+      return;
+    }
+    setSavingOrder(true);
+    try {
+      await onReorderChapters(draftChapters.map((c) => c.id));
+      cancelReorderMode();
+    } finally {
+      setSavingOrder(false);
+    }
+  };
+
+  const displayedChapters = reorderMode ? draftChapters : story.chapters;
 
   const openGenreEditor = () => {
     const current = story.genre?.trim() || '';
@@ -335,29 +402,64 @@ export const StoryDetailView: React.FC<Props> = ({
           </div>
           {story.chapters.length > 1 && (
             <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={onAutoSortChapters}
-                title="Tự động sắp xếp theo số chương (Chương 1 → Chương 2 → Chương 3)"
-                className="min-h-[36px] px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#1a1d24] text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 inline-flex items-center gap-1.5 cursor-pointer"
-              >
-                <ArrowUpDown className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
-                <span>Sắp xếp 1→2→3</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setReorderMode((v) => !v)}
-                className={`min-h-[36px] px-3 rounded-xl border text-xs font-medium inline-flex items-center gap-1.5 transition-colors cursor-pointer ${
-                  reorderMode
-                    ? 'border-blue-500 bg-blue-600 text-white'
-                    : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-[#1a1d24] text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800'
-                }`}
-              >
-                <span>{reorderMode ? 'Xong' : 'Đổi vị trí'}</span>
-              </button>
+              {!reorderMode ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={onAutoSortChapters}
+                    title="Tự động sắp xếp: Văn án/Mở đầu → Chương 1 → Chương 2 → … → Ngoại truyện"
+                    className="min-h-[36px] px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#1a1d24] text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <ArrowUpDown className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+                    <span>Sắp xếp 1→2→3</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={enterReorderMode}
+                    className="min-h-[36px] px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#1a1d24] text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <span>Đổi vị trí nhanh</span>
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    onClick={cancelReorderMode}
+                    disabled={savingOrder}
+                    className="min-h-[36px] px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#1a1d24] text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50 cursor-pointer"
+                  >
+                    Hủy
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSaveOrder}
+                    disabled={savingOrder}
+                    className="min-h-[36px] px-3.5 rounded-xl bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700 disabled:opacity-50 inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Check className="w-3.5 h-3.5" />
+                    <span>
+                      {savingOrder
+                        ? 'Đang lưu…'
+                        : hasDraftChanges
+                          ? 'Lưu thứ tự'
+                          : 'Xong'}
+                    </span>
+                  </button>
+                </>
+              )}
             </div>
           )}
         </div>
+
+        {reorderMode && (
+          <div className="rounded-xl bg-blue-500/10 border border-blue-500/25 px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs text-blue-900 dark:text-blue-200">
+            <span>
+              Kéo thả dòng, <strong>nhập số vị trí + Enter</strong>, hoặc bấm{' '}
+              <strong>Lên đầu / Xuống cuối</strong> rồi bấm <strong>Lưu thứ tự</strong>.
+            </span>
+          </div>
+        )}
 
         {story.chapters.length === 0 ? (
           <div className="rounded-2xl bg-white dark:bg-[#1a1d24] border border-slate-200 dark:border-slate-800 p-8 text-center">
@@ -375,36 +477,118 @@ export const StoryDetailView: React.FC<Props> = ({
           </div>
         ) : (
           <div className="rounded-2xl bg-white dark:bg-[#1a1d24] border border-slate-200 dark:border-slate-800 divide-y divide-slate-100 dark:divide-slate-800">
-            {story.chapters.map((ch, idx) => {
-              const isCurrent = activeChapterIndex === idx;
+            {displayedChapters.map((ch, idx) => {
+              const isCurrent = !reorderMode && activeChapterIndex === idx;
               const unavailableOffline = !ch.downloadedOffline && !isOnline;
               const isEditing = editingIdx === idx;
+              const isDropTarget = reorderMode && dropIdx === idx && dragIdx !== idx;
+              const posVal = posInputs[ch.id] ?? String(idx + 1);
 
               return (
                 <div
                   key={ch.id}
+                  draggable={reorderMode && !isEditing}
+                  onDragStart={(e) => {
+                    if (!reorderMode) return;
+                    setDragIdx(idx);
+                    e.dataTransfer.effectAllowed = 'move';
+                    e.dataTransfer.setData('text/plain', String(idx));
+                  }}
+                  onDragOver={(e) => {
+                    if (!reorderMode || dragIdx === null) return;
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = 'move';
+                    if (dropIdx !== idx) setDropIdx(idx);
+                  }}
+                  onDrop={(e) => {
+                    if (!reorderMode || dragIdx === null) return;
+                    e.preventDefault();
+                    moveDraftItem(dragIdx, idx);
+                    setDragIdx(null);
+                    setDropIdx(null);
+                  }}
+                  onDragEnd={() => {
+                    setDragIdx(null);
+                    setDropIdx(null);
+                  }}
                   onClick={() => {
                     if (!unavailableOffline && !isEditing && !reorderMode) {
                       onPlayChapter(idx);
                     }
                   }}
-                  className={`p-3.5 sm:px-4 flex items-center gap-3 transition-colors ${
+                  className={`p-3.5 sm:px-4 flex items-center gap-2.5 sm:gap-3 transition-colors ${
                     unavailableOffline && !isEditing && !reorderMode
                       ? 'opacity-55 cursor-not-allowed'
-                      : isEditing || reorderMode
+                      : isEditing
                         ? ''
-                        : 'hover:bg-slate-50 dark:hover:bg-slate-800/50 cursor-pointer'
-                  } ${isCurrent ? 'bg-blue-500/8 dark:bg-blue-500/12' : ''}`}
+                        : reorderMode
+                          ? 'cursor-grab active:cursor-grabbing'
+                          : 'hover:bg-slate-50 dark:hover:bg-slate-800/50 cursor-pointer'
+                  } ${isCurrent ? 'bg-blue-500/8 dark:bg-blue-500/12' : ''} ${
+                    isDropTarget ? 'bg-blue-500/12 ring-2 ring-inset ring-blue-500/60' : ''
+                  } ${dragIdx === idx ? 'opacity-45' : ''}`}
                 >
-                  <div
-                    className={`w-9 h-9 rounded-full flex items-center justify-center text-xs font-semibold shrink-0 tabular-nums ${
-                      isCurrent
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
-                    }`}
-                  >
-                    {isCurrent && isPlaying ? <Volume2 className="w-4 h-4" /> : idx + 1}
-                  </div>
+                  {reorderMode ? (
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <GripVertical
+                        className="w-4 h-4 text-slate-400 hidden sm:block shrink-0"
+                        aria-hidden="true"
+                      />
+                      <input
+                        type="number"
+                        min={1}
+                        max={displayedChapters.length}
+                        aria-label={`Vị trí của ${ch.title}`}
+                        title="Nhập số thứ tự mới rồi nhấn Enter"
+                        value={posVal}
+                        onClick={(e) => e.stopPropagation()}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setPosInputs((prev) => ({ ...prev, [ch.id]: v }));
+                        }}
+                        onBlur={() => {
+                          const parsed = Number.parseInt(posVal, 10);
+                          if (!Number.isNaN(parsed) && parsed !== idx + 1) {
+                            moveDraftItem(idx, parsed - 1);
+                          } else {
+                            setPosInputs((prev) => {
+                              const next = { ...prev };
+                              delete next[ch.id];
+                              return next;
+                            });
+                          }
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            const parsed = Number.parseInt(posVal, 10);
+                            if (!Number.isNaN(parsed)) {
+                              moveDraftItem(idx, parsed - 1);
+                            }
+                            (e.currentTarget as HTMLInputElement).blur();
+                          } else if (e.key === 'Escape') {
+                            setPosInputs((prev) => {
+                              const next = { ...prev };
+                              delete next[ch.id];
+                              return next;
+                            });
+                            (e.currentTarget as HTMLInputElement).blur();
+                          }
+                        }}
+                        className="w-12 min-h-[36px] px-1.5 rounded-lg bg-slate-100 dark:bg-[#111318] border border-slate-300 dark:border-slate-700 text-center text-xs font-bold text-slate-900 dark:text-slate-100 tabular-nums focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+                      />
+                    </div>
+                  ) : (
+                    <div
+                      className={`w-9 h-9 rounded-full flex items-center justify-center text-xs font-semibold shrink-0 tabular-nums ${
+                        isCurrent
+                          ? 'bg-blue-600 text-white'
+                          : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
+                      }`}
+                    >
+                      {isCurrent && isPlaying ? <Volume2 className="w-4 h-4" /> : idx + 1}
+                    </div>
+                  )}
                   <div className="min-w-0 flex-1">
                     {isEditing ? (
                       <form
@@ -478,29 +662,39 @@ export const StoryDetailView: React.FC<Props> = ({
                         <>
                           <button
                             type="button"
-                            onClick={() => onMoveChapter(idx, -1)}
+                            onClick={() => moveDraftItem(idx, 0)}
                             disabled={idx === 0}
-                            title="Di chuyển lên"
-                            className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-lg text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-30 cursor-pointer"
+                            title="Đưa lên đầu danh sách (Vị trí 1)"
+                            className="min-h-[38px] min-w-[38px] flex items-center justify-center rounded-lg text-blue-600 dark:text-blue-400 hover:bg-blue-500/10 disabled:opacity-30 cursor-pointer"
+                          >
+                            <ArrowUpToLine className="w-4 h-4" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => moveDraftItem(idx, idx - 1)}
+                            disabled={idx === 0}
+                            title="Lên 1 bậc"
+                            className="min-h-[38px] min-w-[38px] flex items-center justify-center rounded-lg text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-30 cursor-pointer"
                           >
                             <ArrowUp className="w-4 h-4" />
                           </button>
                           <button
                             type="button"
-                            onClick={() => onMoveChapter(idx, 1)}
-                            disabled={idx === story.chapters.length - 1}
-                            title="Di chuyển xuống"
-                            className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-lg text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-30 cursor-pointer"
+                            onClick={() => moveDraftItem(idx, idx + 1)}
+                            disabled={idx === displayedChapters.length - 1}
+                            title="Xuống 1 bậc"
+                            className="min-h-[38px] min-w-[38px] flex items-center justify-center rounded-lg text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-30 cursor-pointer"
                           >
                             <ArrowDown className="w-4 h-4" />
                           </button>
                           <button
                             type="button"
-                            onClick={() => startRename(idx, ch.title)}
-                            title="Đổi tên chương"
-                            className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-lg text-slate-500 hover:text-blue-600 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                            onClick={() => moveDraftItem(idx, displayedChapters.length - 1)}
+                            disabled={idx === displayedChapters.length - 1}
+                            title="Đưa xuống cuối danh sách"
+                            className="min-h-[38px] min-w-[38px] flex items-center justify-center rounded-lg text-blue-600 dark:text-blue-400 hover:bg-blue-500/10 disabled:opacity-30 cursor-pointer"
                           >
-                            <Pencil className="w-4 h-4" />
+                            <ArrowDownToLine className="w-4 h-4" />
                           </button>
                         </>
                       ) : (
