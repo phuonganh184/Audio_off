@@ -4,10 +4,14 @@ import {
   AudioLines,
   ChevronDown,
   ChevronUp,
+  Download,
   Eye,
+  Gauge,
   Lock,
+  Minus,
   Pause,
   Play,
+  Plus,
   RotateCcw,
   RotateCw,
   ScrollText,
@@ -18,14 +22,18 @@ import {
   Sun,
   Timer,
   Volume2,
+  Waves,
 } from 'lucide-react';
 import { StoryCover } from '@/src/components/StoryCover';
 import type { EqGains } from '@/src/lib/audioEqualizer';
 import {
+  AUDIO_FILTER_PRESETS,
   EQ_BANDS,
   EQ_PRESETS,
   OFFLINE_VOICE_PROFILES,
+  type AdvancedAudioFilterState,
   type AmbientMode,
+  type AudioFilterPresetId,
   type ChapterContent,
   type EqPresetId,
   type Story,
@@ -46,6 +54,10 @@ interface Props {
   voices: SpeechSynthesisVoice[];
   selectedVoiceName: string;
   voiceProfileId: VoiceProfileId;
+  voiceEnginePreference: 'auto' | 'device';
+  aiTtsStatus: 'unknown' | 'available' | 'missing_key';
+  isAiAudioActive: boolean;
+  aiDownloadState: { active: boolean; done: number; total: number } | null;
   resolvedVoiceInfo?: {
     name: string;
     lang: string;
@@ -54,9 +66,11 @@ interface Props {
   } | null;
   eqPreset: EqPresetId;
   eqGains: EqGains;
+  advFilter: AdvancedAudioFilterState;
   rate: number;
   sleepMinutes: number;
   ambientMode: AmbientMode;
+  ambientVolume: number;
   wakeLockEnabled: boolean;
   autoPlayNext: boolean;
   blueLightFilter: boolean;
@@ -69,18 +83,40 @@ interface Props {
   onSeekAudioTime: (seconds: number) => void;
   onChangeVoice: (name: string) => void;
   onChangeVoiceProfile: (id: VoiceProfileId) => void;
+  onChangeVoiceEnginePreference: (pref: 'auto' | 'device') => void;
+  onCacheChapterAiVoice: () => void;
   onPreviewVoice: () => void;
   onSelectEqPreset: (presetId: Exclude<EqPresetId, 'custom'>) => void;
   onChangeEqBand: (bandIndex: number, db: number) => void;
+  onSelectAudioFilterPreset: (presetId: Exclude<AudioFilterPresetId, 'custom'>) => void;
+  onChangeDenoising: (val: number) => void;
+  onChangeReverb: (val: number) => void;
+  onToggleVoicePriority: () => void;
   onChangeRate: (rate: number) => void;
   onChangeSleep: (minutes: number) => void;
   onChangeAmbient: (mode: AmbientMode) => void;
+  onChangeAmbientVolume: (vol: number) => void;
   onToggleWakeLock: () => void;
   onToggleAutoPlayNext: () => void;
   onToggleBlueLightFilter: () => void;
 }
 
-const SPEED_PRESETS = [0.75, 0.9, 1, 1.15, 1.25, 1.5, 1.75, 2];
+const SPEED_PRESETS = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.25, 2.5];
+const QUICK_SPEED_PILLS = [0.5, 0.75, 1, 1.25, 1.5, 2, 2.5];
+
+function formatRateLabel(r: number): string {
+  const rounded = Math.round(r * 100) / 100;
+  return Number.isInteger(rounded) ? `${rounded}.0` : String(rounded);
+}
+
+function describeRatePace(r: number): string {
+  if (r < 0.8) return 'Chậm rãi';
+  if (r < 0.95) return 'Hơi chậm';
+  if (r <= 1.05) return 'Tự nhiên';
+  if (r <= 1.35) return 'Hơi nhanh';
+  if (r <= 1.8) return 'Nhanh';
+  return 'Rất nhanh';
+}
 
 function formatTime(sec: number): string {
   if (!isFinite(sec) || sec < 0) return '0:00';
@@ -102,12 +138,18 @@ export const ReaderPlayerView: React.FC<Props> = ({
   voices,
   selectedVoiceName,
   voiceProfileId,
+  voiceEnginePreference,
+  aiTtsStatus,
+  isAiAudioActive,
+  aiDownloadState,
   resolvedVoiceInfo,
   eqPreset,
   eqGains,
+  advFilter,
   rate,
   sleepMinutes,
   ambientMode,
+  ambientVolume,
   wakeLockEnabled,
   autoPlayNext,
   blueLightFilter,
@@ -120,18 +162,25 @@ export const ReaderPlayerView: React.FC<Props> = ({
   onSeekAudioTime,
   onChangeVoice,
   onChangeVoiceProfile,
+  onChangeVoiceEnginePreference,
+  onCacheChapterAiVoice,
   onPreviewVoice,
   onSelectEqPreset,
   onChangeEqBand,
+  onSelectAudioFilterPreset,
+  onChangeDenoising,
+  onChangeReverb,
+  onToggleVoicePriority,
   onChangeRate,
   onChangeSleep,
   onChangeAmbient,
+  onChangeAmbientVolume,
   onToggleWakeLock,
   onToggleAutoPlayNext,
   onToggleBlueLightFilter,
 }) => {
   const [fontSize, setFontSize] = useState<'sm' | 'md' | 'lg'>('md');
-  const [drawerTab, setDrawerTab] = useState<'none' | 'settings' | 'eq'>('none');
+  const [drawerTab, setDrawerTab] = useState<'none' | 'settings' | 'eq' | 'filter'>('none');
   const [handsFreeMode, setHandsFreeMode] = useState<boolean>(() => {
     try {
       return localStorage.getItem('truyen_audio_hands_free') === 'true';
@@ -280,8 +329,12 @@ export const ReaderPlayerView: React.FC<Props> = ({
         : 'text-[18px] leading-[1.95]';
 
   const cycleRate = () => {
-    const idx = SPEED_PRESETS.findIndex((r) => Math.abs(r - rate) < 0.01);
-    const next = SPEED_PRESETS[(idx + 1) % SPEED_PRESETS.length];
+    const nextAbove = SPEED_PRESETS.find((r) => r > rate + 0.01);
+    onChangeRate(nextAbove ?? SPEED_PRESETS[0]);
+  };
+
+  const stepRate = (delta: number) => {
+    const next = Math.min(2.5, Math.max(0.5, Math.round((rate + delta) * 100) / 100));
     onChangeRate(next);
   };
 
@@ -572,9 +625,141 @@ export const ReaderPlayerView: React.FC<Props> = ({
               </div>
 
               <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                {isNativeAudio
-                  ? 'Đang áp dụng trực tiếp cho file âm thanh của chương.'
-                  : 'Áp dụng cho file âm thanh (.mp3, .m4a, .wav) và âm thanh nền (tiếng mưa / ồn nâu).'}
+                {isNativeAudio || isAiAudioActive
+                  ? 'Bộ chỉnh âm 5 dải đang lọc trực tiếp âm thanh giọng đọc và nhạc nền.'
+                  : voiceEnginePreference === 'auto' && aiTtsStatus !== 'missing_key'
+                    ? 'Áp dụng trực tiếp khi phát Giọng AI Tiếng Việt, file âm thanh (.mp3, .wav) và tiếng nền.'
+                    : 'Đang phát bằng giọng hệ thống của trình duyệt (trình duyệt không cho phép lọc EQ qua giọng hệ thống). Dùng Giọng AI Tiếng Việt hoặc file âm thanh để chỉnh âm trực tiếp.'}
+              </p>
+            </div>
+          )}
+
+          {drawerTab === 'filter' && (
+            <div className="max-h-[48vh] overflow-y-auto pb-2.5 mb-1 border-b border-slate-200/80 dark:border-slate-800 space-y-3 text-xs">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Waves className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                  <span className="font-semibold text-slate-900 dark:text-slate-100">
+                    Bộ lọc âm thanh nâng cao
+                  </span>
+                  {(advFilter.denoising > 0 || advFilter.reverb > 0) && (
+                    <span className="px-2 py-0.5 rounded-md bg-blue-500/12 text-blue-600 dark:text-blue-400 text-[11px] font-semibold">
+                      {advFilter.preset === 'custom' ? 'Tùy chỉnh' : 'Đang bật'}
+                    </span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onSelectAudioFilterPreset('default')}
+                  className="min-h-[30px] px-2.5 rounded-lg border border-slate-200 dark:border-slate-700 text-[11px] font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                >
+                  Đặt lại
+                </button>
+              </div>
+
+              {/* Quick Filter Presets */}
+              <div className="flex flex-wrap gap-1.5">
+                {AUDIO_FILTER_PRESETS.map((preset) => {
+                  const active = advFilter.preset === preset.id;
+                  return (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      onClick={() => onSelectAudioFilterPreset(preset.id)}
+                      className={`min-h-[34px] px-3 rounded-xl border text-xs font-medium transition cursor-pointer ${
+                        active
+                          ? 'bg-blue-600 border-blue-600 text-white font-semibold'
+                          : 'bg-slate-50 dark:bg-[#111318] border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:border-blue-500/50'
+                      }`}
+                    >
+                      {preset.label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Denoising & Reverb Sliders */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                <div className="rounded-xl bg-slate-50 dark:bg-[#111318] border border-slate-200 dark:border-slate-800 p-3 space-y-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-semibold text-slate-800 dark:text-slate-200">
+                      Lọc nhiễu &amp; Rõ giọng (Denoising)
+                    </span>
+                    <span className="font-bold tabular-nums text-blue-600 dark:text-blue-400">
+                      {advFilter.denoising}%
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    aria-label="Mức độ lọc nhiễu denoising"
+                    min={0}
+                    max={100}
+                    step={5}
+                    value={advFilter.denoising}
+                    onChange={(e) => onChangeDenoising(Number(e.target.value))}
+                    className="w-full accent-blue-600 cursor-pointer h-1.5"
+                  />
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                    Cắt tạp âm ù/rè, nén ổn định âm lượng và tăng độ nổi dải lời nói để nghe rõ chữ hơn.
+                  </p>
+                </div>
+
+                <div className="rounded-xl bg-slate-50 dark:bg-[#111318] border border-slate-200 dark:border-slate-800 p-3 space-y-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-semibold text-slate-800 dark:text-slate-200">
+                      Độ vang không gian (Reverb)
+                    </span>
+                    <span className="font-bold tabular-nums text-blue-600 dark:text-blue-400">
+                      {advFilter.reverb}%
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    aria-label="Độ vang reverb cho giọng đọc"
+                    min={0}
+                    max={100}
+                    step={5}
+                    value={advFilter.reverb}
+                    onChange={(e) => onChangeReverb(Number(e.target.value))}
+                    className="w-full accent-blue-600 cursor-pointer h-1.5"
+                  />
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                    Thêm chiều sâu phòng đọc ấm áp cho giọng kể chuyện AI mà không làm nhòe câu chữ.
+                  </p>
+                </div>
+              </div>
+
+              {/* Voice Priority Ducking Toggle */}
+              <div className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 dark:bg-[#111318] border border-slate-200 dark:border-slate-800 px-3.5 py-2.5">
+                <div className="min-w-0">
+                  <div className="font-medium text-slate-800 dark:text-slate-200">
+                    Ưu tiên nổi giọng trên âm thanh nền
+                  </div>
+                  <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                    Tự động giảm nhẹ tiếng mưa/ồn nâu khi đang đọc để giọng kể luôn tách bạch
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={advFilter.voicePriority}
+                  onClick={onToggleVoicePriority}
+                  className={`min-h-[32px] px-3 rounded-lg font-semibold shrink-0 cursor-pointer transition-colors ${
+                    advFilter.voicePriority
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
+                  }`}
+                >
+                  {advFilter.voicePriority ? 'Đang bật' : 'Tắt'}
+                </button>
+              </div>
+
+              <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                {isNativeAudio || isAiAudioActive
+                  ? 'Bộ lọc khử nhiễu và độ vang đang xử lý trực tiếp trên luồng giọng đọc.'
+                  : voiceEnginePreference === 'auto' && aiTtsStatus !== 'missing_key'
+                    ? 'Áp dụng trực tiếp khi phát bằng Giọng AI Tiếng Việt hoặc file âm thanh.'
+                    : 'Hãy chọn nguồn Giọng AI Tiếng Việt (hoặc file audio) để áp dụng khử nhiễu và độ vang trực tiếp.'}
               </p>
             </div>
           )}
@@ -583,11 +768,54 @@ export const ReaderPlayerView: React.FC<Props> = ({
             <div className="max-h-[45vh] overflow-y-auto pb-2.5 mb-1 border-b border-slate-200/80 dark:border-slate-800 grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
               {!isNativeAudio && (
                 <>
+                  <div className="sm:col-span-2 flex flex-wrap items-center justify-between gap-2 rounded-xl bg-slate-50 dark:bg-[#111318] border border-slate-200 dark:border-slate-800 px-3 py-2">
+                    <div className="flex items-center gap-1.5">
+                      <Sparkles className="w-3.5 h-3.5 text-blue-500 shrink-0" />
+                      <span className="font-semibold text-slate-700 dark:text-slate-200">
+                        Nguồn giọng đọc:
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => onChangeVoiceEnginePreference('auto')}
+                        className={`min-h-[30px] px-2.5 rounded-lg text-[11px] font-semibold cursor-pointer transition-colors ${
+                          voiceEnginePreference === 'auto'
+                            ? 'bg-blue-600 text-white'
+                            : 'bg-white dark:bg-[#1a1d24] border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300'
+                        }`}
+                      >
+                        Giọng AI Nữ / Nam Việt
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onChangeVoiceEnginePreference('device')}
+                        className={`min-h-[30px] px-2.5 rounded-lg text-[11px] font-semibold cursor-pointer transition-colors ${
+                          voiceEnginePreference === 'device'
+                            ? 'bg-blue-600 text-white'
+                            : 'bg-white dark:bg-[#1a1d24] border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300'
+                        }`}
+                      >
+                        Giọng thiết bị
+                      </button>
+                    </div>
+                  </div>
+
                   <div>
-                    <label className="flex items-center gap-1.5 font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                      <Sparkles className="w-3.5 h-3.5 text-blue-500" />
-                      <span>Giọng đọc AI (Nghe Offline)</span>
-                    </label>
+                    <div className="flex items-center justify-between gap-2 mb-1">
+                      <label className="flex items-center gap-1.5 font-semibold text-slate-700 dark:text-slate-300">
+                        <Sparkles className="w-3.5 h-3.5 text-blue-500" />
+                        <span>Giọng AI Tiếng Việt (Nữ &amp; Nam)</span>
+                      </label>
+                      <button
+                        type="button"
+                        onClick={onPreviewVoice}
+                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-blue-500/12 text-blue-600 dark:text-blue-400 text-[11px] font-semibold hover:bg-blue-500/20 cursor-pointer"
+                      >
+                        <Volume2 className="w-3 h-3" />
+                        <span>Nghe thử</span>
+                      </button>
+                    </div>
                     <div className="relative">
                       <select
                         value={voiceProfileId}
@@ -605,22 +833,35 @@ export const ReaderPlayerView: React.FC<Props> = ({
                     <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
                       {OFFLINE_VOICE_PROFILES.find((vp) => vp.id === voiceProfileId)?.description}
                     </p>
+                    {voiceEnginePreference === 'auto' && (
+                      <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                        {aiTtsStatus === 'available' ? (
+                          <button
+                            type="button"
+                            disabled={!!aiDownloadState?.active}
+                            onClick={onCacheChapterAiVoice}
+                            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-blue-500/40 bg-blue-500/10 text-blue-700 dark:text-blue-300 text-[11px] font-semibold hover:bg-blue-500/15 disabled:opacity-60 cursor-pointer"
+                          >
+                            <Download className="w-3.5 h-3.5" />
+                            <span>
+                              {aiDownloadState?.active
+                                ? `Đang tải giọng AI (${aiDownloadState.done}/${aiDownloadState.total})…`
+                                : 'Tải giọng AI chương này (Nghe offline)'}
+                            </span>
+                          </button>
+                        ) : aiTtsStatus === 'missing_key' ? (
+                          <span className="text-[11px] text-amber-600 dark:text-amber-400">
+                            Chưa cấu hình GEMINI_API_KEY trên máy chủ để tạo giọng AI mới (các đoạn đã tải vẫn nghe offline được; chưa tải sẽ dùng giọng thiết bị).
+                          </span>
+                        ) : null}
+                      </div>
+                    )}
                   </div>
 
                   <div>
-                    <div className="flex items-center justify-between gap-2 mb-1">
-                      <label className="block font-semibold text-slate-700 dark:text-slate-300">
-                        Giọng Tiếng Việt thiết bị
-                      </label>
-                      <button
-                        type="button"
-                        onClick={onPreviewVoice}
-                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-blue-500/12 text-blue-600 dark:text-blue-400 text-[11px] font-semibold hover:bg-blue-500/20 cursor-pointer"
-                      >
-                        <Volume2 className="w-3 h-3" />
-                        <span>Nghe thử</span>
-                      </button>
-                    </div>
+                    <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                      Giọng dự phòng trên thiết bị
+                    </label>
                     <div className="relative">
                       <select
                         value={selectedVoiceName}
@@ -643,19 +884,23 @@ export const ReaderPlayerView: React.FC<Props> = ({
                       <ChevronDown className="w-4 h-4 text-slate-400 absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
                     </div>
                     <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-1 space-y-0.5">
-                      {resolvedVoiceInfo && (
+                      {voiceEnginePreference === 'auto' &&
+                      (isAiAudioActive || aiTtsStatus === 'available') ? (
+                        <div className="font-medium text-emerald-600 dark:text-emerald-400">
+                          Đang dùng Giọng AI{' '}
+                          {OFFLINE_VOICE_PROFILES.find((vp) => vp.id === voiceProfileId)
+                            ?.aiGenderLabel || 'Tiếng Việt'}{' '}
+                          (hỗ trợ EQ &amp; tự lưu offline).
+                        </div>
+                      ) : resolvedVoiceInfo ? (
                         <div className="font-medium text-slate-700 dark:text-slate-300 truncate">
                           Đang đọc bằng: {resolvedVoiceInfo.name} (
                           {resolvedVoiceInfo.localService ? 'Offline' : 'Trực tuyến'})
                         </div>
-                      )}
-                      {resolvedVoiceInfo?.genderFallbackNotice ? (
+                      ) : null}
+                      {voiceEnginePreference === 'device' && resolvedVoiceInfo?.genderFallbackNotice ? (
                         <div className="text-amber-600 dark:text-amber-400">
                           {resolvedVoiceInfo.genderFallbackNotice}
-                        </div>
-                      ) : voices.length <= 1 && (!voices[0] || !voices[0].localService) ? (
-                        <div>
-                          Trình duyệt hiện chỉ có 1 giọng Tiếng Việt trực tuyến (có thể bỏ qua chỉnh trầm/bổng). Dùng Microsoft Edge hoặc cài gói giọng Việt ngoại tuyến để nghe rõ các giọng AI.
                         </div>
                       ) : (
                         <div>Có {voices.length} giọng Tiếng Việt trên thiết bị.</div>
@@ -665,24 +910,103 @@ export const ReaderPlayerView: React.FC<Props> = ({
                 </>
               )}
 
-              <div>
-                <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                  Tốc độ đọc
-                </label>
-                <select
-                  value={rate}
-                  onChange={(e) => onChangeRate(Number(e.target.value))}
-                  className="w-full min-h-[40px] px-3 rounded-xl bg-slate-50 dark:bg-[#111318] border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-slate-100"
-                >
-                  {SPEED_PRESETS.map((r) => (
-                    <option key={r} value={r}>
-                      {r}×
-                    </option>
-                  ))}
-                </select>
+              <div className="sm:col-span-2 rounded-xl bg-slate-50 dark:bg-[#111318] border border-slate-200 dark:border-slate-800 p-3 space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <Gauge className="w-3.5 h-3.5 text-blue-500 shrink-0" />
+                    <label
+                      htmlFor="ai-voice-speed-slider"
+                      className="font-semibold text-slate-800 dark:text-slate-200 truncate"
+                    >
+                      Tốc độ giọng AI &amp; phát (0.5× – 2.5×)
+                    </label>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                      {describeRatePace(rate)}
+                    </span>
+                    <span className="font-bold tabular-nums text-blue-600 dark:text-blue-400">
+                      {formatRateLabel(rate)}×
+                    </span>
+                    {Math.abs(rate - 1) > 0.01 && (
+                      <button
+                        type="button"
+                        onClick={() => onChangeRate(1)}
+                        className="min-h-[26px] px-2 rounded-lg border border-slate-200 dark:border-slate-700 text-[11px] font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-200/70 dark:hover:bg-slate-800 whitespace-nowrap cursor-pointer"
+                      >
+                        1.0×
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => stepRate(-0.05)}
+                    disabled={rate <= 0.5}
+                    aria-label="Giảm tốc độ đọc 0.05 lần"
+                    title="Giảm 0.05×"
+                    className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#1a1d24] text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40 shrink-0 cursor-pointer"
+                  >
+                    <Minus className="w-3.5 h-3.5" />
+                  </button>
+
+                  <div className="flex-1 min-w-0 space-y-1">
+                    <input
+                      id="ai-voice-speed-slider"
+                      type="range"
+                      aria-label="Điều chỉnh tốc độ giọng AI từ 0.5x đến 2.5x"
+                      min={0.5}
+                      max={2.5}
+                      step={0.05}
+                      value={Math.min(2.5, Math.max(0.5, rate))}
+                      onChange={(e) => onChangeRate(Number(e.target.value))}
+                      className="w-full accent-blue-600 cursor-pointer h-1.5"
+                    />
+                    <div className="flex justify-between text-[10px] text-slate-400 dark:text-slate-500 tabular-nums px-0.5">
+                      <span>0.5×</span>
+                      <span>1.0×</span>
+                      <span>1.5×</span>
+                      <span>2.0×</span>
+                      <span>2.5×</span>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => stepRate(0.05)}
+                    disabled={rate >= 2.5}
+                    aria-label="Tăng tốc độ đọc 0.05 lần"
+                    title="Tăng 0.05×"
+                    className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#1a1d24] text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40 shrink-0 cursor-pointer"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {QUICK_SPEED_PILLS.map((preset) => {
+                    const active = Math.abs(rate - preset) < 0.01;
+                    return (
+                      <button
+                        key={preset}
+                        type="button"
+                        onClick={() => onChangeRate(preset)}
+                        className={`min-h-[30px] px-2.5 rounded-lg border text-[11px] font-semibold tabular-nums whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
+                          active
+                            ? 'bg-blue-600 border-blue-600 text-white'
+                            : 'bg-white dark:bg-[#1a1d24] border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:border-blue-500/50'
+                        }`}
+                      >
+                        {formatRateLabel(preset)}×
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
 
-              <div>
+              <div className="sm:col-span-2">
                 <label className="flex items-center gap-1.5 font-semibold text-slate-700 dark:text-slate-300 mb-1">
                   <Timer className="w-3.5 h-3.5" />
                   <span>Hẹn giờ tắt</span>
@@ -700,20 +1024,43 @@ export const ReaderPlayerView: React.FC<Props> = ({
                 </select>
               </div>
 
-              <div>
-                <label className="flex items-center gap-1.5 font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                  <Volume2 className="w-3.5 h-3.5" />
-                  <span>Âm thanh giữ phát nền</span>
-                </label>
-                <select
-                  value={ambientMode}
-                  onChange={(e) => onChangeAmbient(e.target.value as AmbientMode)}
-                  className="w-full min-h-[40px] px-3 rounded-xl bg-slate-50 dark:bg-[#111318] border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-slate-100"
-                >
-                  <option value="silent">Im lặng (Giữ phiên phát nền)</option>
-                  <option value="rain">Tiếng mưa nhẹ thư giãn</option>
-                  <option value="brown">Tiếng ồn nâu ấm (Dễ ngủ)</option>
-                </select>
+              <div className="sm:col-span-2 space-y-2">
+                <div>
+                  <label className="flex items-center gap-1.5 font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                    <Volume2 className="w-3.5 h-3.5" />
+                    <span>Âm thanh giữ phát nền</span>
+                  </label>
+                  <select
+                    value={ambientMode}
+                    onChange={(e) => onChangeAmbient(e.target.value as AmbientMode)}
+                    className="w-full min-h-[40px] px-3 rounded-xl bg-slate-50 dark:bg-[#111318] border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-slate-100"
+                  >
+                    <option value="silent">Im lặng (Giữ phiên phát nền)</option>
+                    <option value="rain">Tiếng mưa nhẹ thư giãn</option>
+                    <option value="brown">Tiếng ồn nâu ấm (Dễ ngủ)</option>
+                  </select>
+                </div>
+
+                {ambientMode !== 'silent' && (
+                  <div className="rounded-xl bg-slate-50 dark:bg-[#111318] border border-slate-200 dark:border-slate-800 px-3 py-2 flex items-center gap-3">
+                    <span className="text-[11px] font-medium text-slate-600 dark:text-slate-300 shrink-0">
+                      Âm lượng nền
+                    </span>
+                    <input
+                      type="range"
+                      aria-label="Âm lượng âm thanh nền"
+                      min={0.03}
+                      max={0.45}
+                      step={0.01}
+                      value={ambientVolume}
+                      onChange={(e) => onChangeAmbientVolume(Number(e.target.value))}
+                      className="flex-1 accent-blue-600 cursor-pointer h-1.5"
+                    />
+                    <span className="w-10 text-right font-semibold tabular-nums text-blue-600 dark:text-blue-400 shrink-0">
+                      {Math.round(ambientVolume * 100)}%
+                    </span>
+                  </div>
+                )}
               </div>
 
               <div className="sm:col-span-2 flex items-center justify-between gap-3 rounded-xl bg-slate-50 dark:bg-[#111318] border border-slate-200 dark:border-slate-800 px-3.5 py-2.5">
@@ -868,9 +1215,9 @@ export const ReaderPlayerView: React.FC<Props> = ({
               type="button"
               onClick={cycleRate}
               title="Đổi nhanh tốc độ đọc"
-              className="min-h-[38px] min-w-[48px] px-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#111318] text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 tabular-nums shrink-0 cursor-pointer"
+              className="min-h-[38px] min-w-[52px] px-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#111318] text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 tabular-nums whitespace-nowrap shrink-0 cursor-pointer"
             >
-              {rate}×
+              {formatRateLabel(rate)}×
             </button>
 
             <div className="flex items-center justify-center gap-1 sm:gap-3">
@@ -928,6 +1275,23 @@ export const ReaderPlayerView: React.FC<Props> = ({
             </div>
 
             <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={() => setDrawerTab((t) => (t === 'filter' ? 'none' : 'filter'))}
+                aria-expanded={drawerTab === 'filter'}
+                title="Bộ lọc âm thanh nâng cao (Khử nhiễu & Độ vang)"
+                className={`min-h-[38px] px-2.5 rounded-xl border text-xs font-semibold inline-flex items-center gap-1 cursor-pointer ${
+                  drawerTab === 'filter'
+                    ? 'border-blue-500 bg-blue-600 text-white'
+                    : advFilter.denoising > 0 || advFilter.reverb > 0
+                      ? 'border-blue-500/40 bg-blue-500/10 text-blue-700 dark:text-blue-300'
+                      : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#111318] text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800'
+                }`}
+              >
+                <Waves className="w-4 h-4 shrink-0" />
+                <span className="hidden sm:inline">Lọc âm</span>
+              </button>
+
               <button
                 type="button"
                 onClick={() => setDrawerTab((t) => (t === 'eq' ? 'none' : 'eq'))}

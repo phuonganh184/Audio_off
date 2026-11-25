@@ -31,9 +31,13 @@ import { SyncSettingsView } from '@/src/components/SyncSettingsView';
 import { useOnlineStatus } from '@/src/hooks/useOnlineStatus';
 import { useTheme } from '@/src/hooks/useTheme';
 import {
+  loadSavedAudioFilterState,
   loadSavedEqState,
+  matchAudioFilterPreset,
   resumeAndSyncEqualizer,
+  saveAudioFilterState,
   saveEqState,
+  updateAdvancedFilterOnAudio,
   updateEqualizerGainsOnAudio,
   type EqGains,
   type EqState,
@@ -75,10 +79,13 @@ import {
   getAllPlaylists,
   getAllProgress,
   getAllStories,
+  getCachedTtsAudio,
   getChapterContent,
   getStorageStats,
   getSyncQueue,
   importBackupData,
+  makeTtsCacheKey,
+  putCachedTtsAudio,
   putChapterContent,
   putPlaylist,
   putProgress,
@@ -92,11 +99,14 @@ import {
   sanitizeId,
 } from '@/src/lib/parsers';
 import {
+  AUDIO_FILTER_PRESETS,
   EQ_PRESETS,
   OFFLINE_VOICE_PROFILES,
   PLAYLIST_WHOLE_STORY_MARKER,
   isWholeStoryPlaylistItem,
+  type AdvancedAudioFilterState,
   type AmbientMode,
+  type AudioFilterPresetId,
   type ChapterContent,
   type ChapterSummary,
   type EqPresetId,
@@ -245,7 +255,8 @@ export default function App() {
   });
   const [rate, setRate] = useState<number>(() => {
     try {
-      return Number(localStorage.getItem('truyen_audio_rate')) || 1;
+      const saved = Number(localStorage.getItem('truyen_audio_rate'));
+      return Number.isFinite(saved) && saved >= 0.5 && saved <= 2.5 ? saved : 1;
     } catch {
       return 1;
     }
@@ -259,6 +270,28 @@ export default function App() {
       return 'silent';
     }
   });
+  const [ambientVolume, setAmbientVolume] = useState<number>(() => {
+    try {
+      const raw = Number(localStorage.getItem('truyen_audio_ambient_volume'));
+      return Number.isFinite(raw) && raw >= 0.03 && raw <= 0.45 ? raw : 0.12;
+    } catch {
+      return 0.12;
+    }
+  });
+  const [voiceEnginePreference, setVoiceEnginePreference] = useState<'auto' | 'device'>(() => {
+    try {
+      return localStorage.getItem('truyen_audio_voice_engine') === 'device' ? 'device' : 'auto';
+    } catch {
+      return 'auto';
+    }
+  });
+  const [aiTtsStatus, setAiTtsStatus] = useState<'unknown' | 'available' | 'missing_key'>('unknown');
+  const [isAiAudioActive, setIsAiAudioActive] = useState(false);
+  const [aiDownloadState, setAiDownloadState] = useState<{
+    active: boolean;
+    done: number;
+    total: number;
+  } | null>(null);
   const [wakeLockEnabled, setWakeLockEnabled] = useState(false);
   const [autoPlayNext, setAutoPlayNext] = useState<boolean>(() => {
     try {
@@ -276,10 +309,16 @@ export default function App() {
     }
   });
   const [eqState, setEqState] = useState<EqState>(() => loadSavedEqState());
+  const [advFilter, setAdvFilter] = useState<AdvancedAudioFilterState>(() =>
+    loadSavedAudioFilterState()
+  );
 
-  // Native <audio> element state for imported mp3/wav/m4a chapters
+  // Native <audio> element state for imported mp3/wav/m4a chapters & AI TTS <audio>
   const nativeAudioRef = useRef<HTMLAudioElement | null>(null);
   const nativeAudioUrlRef = useRef<string | null>(null);
+  const ttsAudioRef = useRef<HTMLAudioElement | null>(null);
+  const ttsAudioUrlRef = useRef<string | null>(null);
+  const ttsMissingKeyWarnedRef = useRef(false);
   const [audioCurrentTime, setAudioCurrentTime] = useState(0);
   const [audioDuration, setAudioDuration] = useState(0);
 
@@ -295,13 +334,17 @@ export default function App() {
   const chunksRef = useRef(chunks);
   const activeStoryIdRef = useRef(activeStoryId);
   const activeChapterIdxRef = useRef(activeChapterIndex);
+  const activeChapterContentRef = useRef(activeChapterContent);
   const rateRef = useRef(rate);
   const voicesRef = useRef(voices);
   const selectedVoiceRef = useRef(selectedVoiceName);
   const voiceProfileRef = useRef(voiceProfileId);
+  const voiceEnginePrefRef = useRef(voiceEnginePreference);
+  const aiTtsStatusRef = useRef(aiTtsStatus);
   const ambientModeRef = useRef(ambientMode);
   const autoPlayNextRef = useRef(autoPlayNext);
   const eqGainsRef = useRef<EqGains>(eqState.gains);
+  const advFilterRef = useRef<AdvancedAudioFilterState>(advFilter);
   const playbackContextRef = useRef(playbackContext);
   const userRef = useRef(user);
   const isOnlineRef = useRef(isOnline);
@@ -314,13 +357,17 @@ export default function App() {
   chunksRef.current = chunks;
   activeStoryIdRef.current = activeStoryId;
   activeChapterIdxRef.current = activeChapterIndex;
+  activeChapterContentRef.current = activeChapterContent;
   rateRef.current = rate;
   voicesRef.current = voices;
   selectedVoiceRef.current = selectedVoiceName;
   voiceProfileRef.current = voiceProfileId;
+  voiceEnginePrefRef.current = voiceEnginePreference;
+  aiTtsStatusRef.current = aiTtsStatus;
   ambientModeRef.current = ambientMode;
   autoPlayNextRef.current = autoPlayNext;
   eqGainsRef.current = eqState.gains;
+  advFilterRef.current = advFilter;
   playbackContextRef.current = playbackContext;
   userRef.current = user;
   isOnlineRef.current = isOnline;
@@ -389,6 +436,34 @@ export default function App() {
     };
   }, []);
 
+  // Sync saved ambient volume (with subtle voice-priority ducking) & check server AI TTS status
+  useEffect(() => {
+    const effectiveVol =
+      advFilter.voicePriority && isPlaying
+        ? Math.max(0.03, Number((ambientVolume * 0.65).toFixed(3)))
+        : ambientVolume;
+    keepAliveEngine.setVolume(effectiveVol);
+  }, [ambientVolume, advFilter.voicePriority, isPlaying]);
+
+  useEffect(() => {
+    if (!isOnline) return;
+    let cancelled = false;
+    fetch('/api/tts/status')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { available?: boolean } | null) => {
+        if (cancelled || !data) return;
+        const next = data.available ? 'available' : 'missing_key';
+        setAiTtsStatus(next);
+        aiTtsStatusRef.current = next;
+      })
+      .catch(() => {
+        // Ignore transient status failure
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOnline]);
+
   // Progress persistence (IndexedDB + Cloud Sync)
   const saveProgress = useCallback(
     async (
@@ -453,6 +528,19 @@ export default function App() {
     }
   };
 
+  const stopTtsAudio = useCallback(() => {
+    if (ttsAudioRef.current) {
+      ttsAudioRef.current.onended = null;
+      ttsAudioRef.current.onerror = null;
+      ttsAudioRef.current.pause();
+    }
+    if (ttsAudioUrlRef.current) {
+      URL.revokeObjectURL(ttsAudioUrlRef.current);
+      ttsAudioUrlRef.current = null;
+    }
+    setIsAiAudioActive(false);
+  }, []);
+
   const pausePlayback = useCallback(
     (syncCloud = true) => {
       speechTokenRef.current++;
@@ -465,6 +553,7 @@ export default function App() {
       if ('speechSynthesis' in window) {
         window.speechSynthesis.cancel();
       }
+      stopTtsAudio();
       if (nativeAudioRef.current) {
         nativeAudioRef.current.pause();
       }
@@ -499,7 +588,7 @@ export default function App() {
         }
       }
     },
-    [activeChapterContent, saveProgress]
+    [activeChapterContent, saveProgress, stopTtsAudio]
   );
 
   const pausePlaybackRef = useRef(pausePlayback);
@@ -627,12 +716,87 @@ export default function App() {
     return { profile, chosen, effectiveRate };
   }, []);
 
-  const speakCurrentChunk = useCallback(
-    (startIndex: number) => {
-      if (!('speechSynthesis' in window)) {
-        toast('Trình duyệt này chưa hỗ trợ đọc giọng nói.');
+  const fetchOrLoadAiTtsChunk = useCallback(
+    async (text: string, profileId: VoiceProfileId, chapterId: string): Promise<Blob | null> => {
+      const trimmed = text.trim();
+      if (!trimmed) return null;
+      const cacheKey = makeTtsCacheKey(profileId, trimmed);
+      try {
+        const cached = await getCachedTtsAudio(cacheKey);
+        if (cached) return cached;
+      } catch {
+        // Ignore IndexedDB cache read error
+      }
+
+      if (!isOnlineRef.current || aiTtsStatusRef.current === 'missing_key') {
+        return null;
+      }
+
+      try {
+        const res = await fetch('/api/tts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: trimmed, voiceProfileId: profileId }),
+        });
+
+        if (res.status === 503) {
+          const payload = (await res.json().catch(() => null)) as { error?: string } | null;
+          if (payload?.error === 'MISSING_GEMINI_API_KEY') {
+            setAiTtsStatus('missing_key');
+            aiTtsStatusRef.current = 'missing_key';
+            if (!ttsMissingKeyWarnedRef.current) {
+              ttsMissingKeyWarnedRef.current = true;
+              toast('Chưa cấu hình GEMINI_API_KEY cho giọng AI — tạm đọc bằng giọng thiết bị');
+            }
+          }
+          return null;
+        }
+
+        if (!res.ok) return null;
+
+        const blob = await res.blob();
+        if (!blob || blob.size < 100) return null;
+        setAiTtsStatus('available');
+        aiTtsStatusRef.current = 'available';
+        try {
+          await putCachedTtsAudio({
+            key: cacheKey,
+            chapterId,
+            voiceProfileId: profileId,
+            blob,
+            updatedAt: Date.now(),
+          });
+        } catch {
+          // Ignore cache write errors
+        }
+        return blob;
+      } catch {
+        return null;
+      }
+    },
+    [toast]
+  );
+
+  const prefetchNextAiChunks = useCallback(
+    (currentIndex: number, profileId: VoiceProfileId, chapterId: string) => {
+      if (
+        !isOnlineRef.current ||
+        voiceEnginePrefRef.current !== 'auto' ||
+        aiTtsStatusRef.current === 'missing_key'
+      ) {
         return;
       }
+      const list = chunksRef.current;
+      const nextIdx = currentIndex + 1;
+      if (nextIdx < list.length) {
+        void fetchOrLoadAiTtsChunk(list[nextIdx].t, profileId, chapterId);
+      }
+    },
+    [fetchOrLoadAiTtsChunk]
+  );
+
+  const speakCurrentChunk = useCallback(
+    async (startIndex: number) => {
       const list = chunksRef.current;
       if (startIndex >= list.length) {
         if (autoPlayNextRef.current) {
@@ -650,16 +814,72 @@ export default function App() {
         window.clearTimeout(speakDelayRef.current);
         speakDelayRef.current = null;
       }
-      window.speechSynthesis.cancel();
+      if ('speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+      }
+      stopTtsAudio();
 
       setChunkIndex(startIndex);
       chunkIndexRef.current = startIndex;
 
       const chunkText = list[startIndex].t;
+      const { profile, chosen, effectiveRate } = resolveVietnameseUtteranceSettings();
+      const sid = activeStoryIdRef.current;
+      const st = storiesRef.current.find((s) => s.id === sid);
+      const chTitle = st?.chapters[activeChapterIdxRef.current]?.title || '';
+      const chId = activeChapterContentRef.current?.id || 'chapter';
+
+      // Prefer genuine Vietnamese AI voice (cached offline or synthesized via /api/tts)
+      if (voiceEnginePrefRef.current === 'auto') {
+        const aiBlob = await fetchOrLoadAiTtsChunk(chunkText, profile.id, chId);
+        if (token !== speechTokenRef.current || !playingRef.current) return;
+
+        if (aiBlob) {
+          const url = URL.createObjectURL(aiBlob);
+          ttsAudioUrlRef.current = url;
+          if (!ttsAudioRef.current) {
+            ttsAudioRef.current = new Audio();
+          }
+          const audio = ttsAudioRef.current;
+          audio.src = url;
+          audio.playbackRate = Math.min(2.5, Math.max(0.5, effectiveRate));
+          setIsAiAudioActive(true);
+
+          try {
+            await resumeAndSyncEqualizer(audio, eqGainsRef.current, {
+              isVoiceStream: true,
+              advancedFilter: advFilterRef.current,
+            });
+            audio.onended = () => {
+              if (token !== speechTokenRef.current || !playingRef.current) return;
+              const nextIdx = startIndex + 1;
+              if (sid && nextIdx % 4 === 0) {
+                saveProgress(sid, activeChapterIdxRef.current, nextIdx, 0, list.length, chTitle, false);
+              }
+              void speakCurrentChunk(nextIdx);
+            };
+            audio.onerror = () => {
+              if (token !== speechTokenRef.current || !playingRef.current) return;
+              setIsAiAudioActive(false);
+              void speakCurrentChunk(startIndex + 1);
+            };
+            await audio.play();
+            prefetchNextAiChunks(startIndex, profile.id, chId);
+            return;
+          } catch {
+            stopTtsAudio();
+          }
+        }
+      }
+
+      if (!('speechSynthesis' in window)) {
+        toast('Trình duyệt này chưa hỗ trợ đọc giọng nói.');
+        return;
+      }
+
+      setIsAiAudioActive(false);
       const utterance = new SpeechSynthesisUtterance(chunkText);
       activeUtteranceRef.current = utterance;
-
-      const { profile, chosen, effectiveRate } = resolveVietnameseUtteranceSettings();
 
       if (chosen) {
         utterance.voice = chosen;
@@ -671,10 +891,6 @@ export default function App() {
       utterance.pitch = profile.pitch;
       utterance.rate = effectiveRate;
 
-      const sid = activeStoryIdRef.current;
-      const st = storiesRef.current.find((s) => s.id === sid);
-      const chTitle = st?.chapters[activeChapterIdxRef.current]?.title || '';
-
       utterance.onend = () => {
         clearWatchdog();
         if (token !== speechTokenRef.current || !playingRef.current) return;
@@ -682,7 +898,7 @@ export default function App() {
         if (sid && nextIdx % 4 === 0) {
           saveProgress(sid, activeChapterIdxRef.current, nextIdx, 0, list.length, chTitle, false);
         }
-        speakCurrentChunk(nextIdx);
+        void speakCurrentChunk(nextIdx);
       };
 
       utterance.onerror = (ev) => {
@@ -695,7 +911,7 @@ export default function App() {
           return;
         }
         if (playingRef.current) {
-          speakCurrentChunk(startIndex + 1);
+          void speakCurrentChunk(startIndex + 1);
         }
       };
 
@@ -707,7 +923,7 @@ export default function App() {
       watchdogRef.current = window.setTimeout(() => {
         if (token === speechTokenRef.current && playingRef.current) {
           window.speechSynthesis.cancel();
-          speakCurrentChunk(startIndex + 1);
+          void speakCurrentChunk(startIndex + 1);
         }
       }, approxMs);
 
@@ -721,16 +937,20 @@ export default function App() {
         }
       }, 90);
     },
-    [handleAdvanceChapter, resolveVietnameseUtteranceSettings, saveProgress, toast]
+    [
+      fetchOrLoadAiTtsChunk,
+      handleAdvanceChapter,
+      prefetchNextAiChunks,
+      resolveVietnameseUtteranceSettings,
+      saveProgress,
+      stopTtsAudio,
+      toast,
+    ]
   );
 
-  const previewCurrentVoice = useCallback(() => {
-    if (!('speechSynthesis' in window)) {
-      toast('Trình duyệt này chưa hỗ trợ đọc giọng nói.');
-      return;
-    }
+  const previewCurrentVoice = useCallback(async () => {
     if (playingRef.current) {
-      speakCurrentChunk(chunkIndexRef.current);
+      void speakCurrentChunk(chunkIndexRef.current);
       return;
     }
     const token = ++speechTokenRef.current;
@@ -739,12 +959,51 @@ export default function App() {
       window.clearTimeout(speakDelayRef.current);
       speakDelayRef.current = null;
     }
-    window.speechSynthesis.cancel();
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
+    stopTtsAudio();
 
     const { profile, chosen, effectiveRate } = resolveVietnameseUtteranceSettings();
-    const sample = new SpeechSynthesisUtterance(
-      `Xin chào, đây là giọng ${profile.label.replace(/\s*\(.*?\)\s*/g, '')}.`
-    );
+    const sampleText = `Xin chào, đây là giọng ${profile.label.replace(/\s*\(.*?\)\s*/g, '')} đọc truyện audio.`;
+
+    if (voiceEnginePrefRef.current === 'auto') {
+      const aiBlob = await fetchOrLoadAiTtsChunk(sampleText, profile.id, '__preview__');
+      if (token !== speechTokenRef.current || playingRef.current) return;
+      if (aiBlob) {
+        const url = URL.createObjectURL(aiBlob);
+        ttsAudioUrlRef.current = url;
+        if (!ttsAudioRef.current) {
+          ttsAudioRef.current = new Audio();
+        }
+        const audio = ttsAudioRef.current;
+        audio.src = url;
+        audio.playbackRate = Math.min(2.5, Math.max(0.5, effectiveRate));
+        try {
+          await resumeAndSyncEqualizer(audio, eqGainsRef.current, {
+            isVoiceStream: true,
+            advancedFilter: advFilterRef.current,
+          });
+          audio.onended = () => {
+            if (ttsAudioUrlRef.current === url) {
+              URL.revokeObjectURL(url);
+              ttsAudioUrlRef.current = null;
+            }
+          };
+          await audio.play();
+          return;
+        } catch {
+          stopTtsAudio();
+        }
+      }
+    }
+
+    if (!('speechSynthesis' in window)) {
+      toast('Trình duyệt này chưa hỗ trợ đọc giọng nói.');
+      return;
+    }
+
+    const sample = new SpeechSynthesisUtterance(sampleText);
     activeUtteranceRef.current = sample;
     if (chosen) {
       sample.voice = chosen;
@@ -764,7 +1023,37 @@ export default function App() {
         window.speechSynthesis.speak(sample);
       }
     }, 90);
-  }, [resolveVietnameseUtteranceSettings, speakCurrentChunk, toast]);
+  }, [fetchOrLoadAiTtsChunk, resolveVietnameseUtteranceSettings, speakCurrentChunk, stopTtsAudio, toast]);
+
+  const handleCacheChapterAiVoice = useCallback(async () => {
+    const ch = activeChapterContentRef.current;
+    const list = chunksRef.current;
+    if (!ch || !list.length) return;
+    if (!isOnlineRef.current) {
+      toast('Cần kết nối mạng để tải giọng AI lưu vào bộ nhớ ngoại tuyến.');
+      return;
+    }
+    const profId = voiceProfileRef.current;
+    setAiDownloadState({ active: true, done: 0, total: list.length });
+    let completed = 0;
+    try {
+      for (const chunk of list) {
+        const blob = await fetchOrLoadAiTtsChunk(chunk.t, profId, ch.id);
+        completed++;
+        setAiDownloadState({ active: true, done: completed, total: list.length });
+        if (!blob && aiTtsStatusRef.current === 'missing_key') {
+          break;
+        }
+      }
+      if (aiTtsStatusRef.current === 'missing_key') {
+        toast('Chưa cấu hình GEMINI_API_KEY trên máy chủ để tải giọng AI.');
+      } else {
+        toast('Đã tải xong giọng AI cho chương này — có thể nghe offline & chỉnh EQ!');
+      }
+    } finally {
+      setAiDownloadState(null);
+    }
+  }, [fetchOrLoadAiTtsChunk, toast]);
 
   const startPlayback = useCallback(async () => {
     if (!activeChapterContent) return;
@@ -800,12 +1089,17 @@ export default function App() {
     if (activeChapterContent.audioBlob && nativeAudioRef.current) {
       nativeAudioRef.current.playbackRate = rateRef.current;
       try {
-        await resumeAndSyncEqualizer(nativeAudioRef.current, eqGainsRef.current);
+        await resumeAndSyncEqualizer(nativeAudioRef.current, eqGainsRef.current, {
+          isVoiceStream: true,
+          advancedFilter: advFilterRef.current,
+        });
         await nativeAudioRef.current.play();
         if (ambientModeRef.current !== 'silent') {
           await keepAliveEngine.start(ambientModeRef.current);
           if (eqGainsRef.current.some((g) => g !== 0)) {
-            await resumeAndSyncEqualizer(keepAliveEngine.getAudioElement(), eqGainsRef.current);
+            await resumeAndSyncEqualizer(keepAliveEngine.getAudioElement(), eqGainsRef.current, {
+              isVoiceStream: false,
+            });
           }
         } else {
           keepAliveEngine.stop();
@@ -819,7 +1113,9 @@ export default function App() {
 
     await keepAliveEngine.start(ambientModeRef.current);
     if (ambientModeRef.current !== 'silent' && eqGainsRef.current.some((g) => g !== 0)) {
-      await resumeAndSyncEqualizer(keepAliveEngine.getAudioElement(), eqGainsRef.current);
+      await resumeAndSyncEqualizer(keepAliveEngine.getAudioElement(), eqGainsRef.current, {
+        isVoiceStream: false,
+      });
     }
     speakCurrentChunk(chunkIndexRef.current);
   }, [activeChapterContent, saveProgress, speakCurrentChunk, toast]);
@@ -896,6 +1192,7 @@ export default function App() {
       speechTokenRef.current++;
       clearWatchdog();
       if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+      stopTtsAudio();
       if (nativeAudioRef.current) {
         nativeAudioRef.current.pause();
       }
@@ -992,12 +1289,17 @@ export default function App() {
           setIsPlaying(true);
           playingRef.current = true;
           try {
-            await resumeAndSyncEqualizer(audio, eqGainsRef.current);
+            await resumeAndSyncEqualizer(audio, eqGainsRef.current, {
+              isVoiceStream: true,
+              advancedFilter: advFilterRef.current,
+            });
             await audio.play();
             if (ambientModeRef.current !== 'silent') {
               await keepAliveEngine.start(ambientModeRef.current);
               if (eqGainsRef.current.some((g) => g !== 0)) {
-                await resumeAndSyncEqualizer(keepAliveEngine.getAudioElement(), eqGainsRef.current);
+                await resumeAndSyncEqualizer(keepAliveEngine.getAudioElement(), eqGainsRef.current, {
+                  isVoiceStream: false,
+                });
               }
             } else {
               keepAliveEngine.stop();
@@ -1011,7 +1313,9 @@ export default function App() {
         playingRef.current = true;
         await keepAliveEngine.start(ambientModeRef.current);
         if (ambientModeRef.current !== 'silent' && eqGainsRef.current.some((g) => g !== 0)) {
-          await resumeAndSyncEqualizer(keepAliveEngine.getAudioElement(), eqGainsRef.current);
+          await resumeAndSyncEqualizer(keepAliveEngine.getAudioElement(), eqGainsRef.current, {
+            isVoiceStream: false,
+          });
         }
         // Slight delay so state refs settle cleanly before uttering
         window.setTimeout(() => {
@@ -1045,7 +1349,15 @@ export default function App() {
         mediaHandlersRef.current
       );
     },
-    [handleAdvanceChapter, progressMap, refreshLocalData, saveProgress, speakCurrentChunk, toast]
+    [
+      handleAdvanceChapter,
+      progressMap,
+      refreshLocalData,
+      saveProgress,
+      speakCurrentChunk,
+      stopTtsAudio,
+      toast,
+    ]
   );
 
   openChapterRef.current = openChapter;
@@ -1144,10 +1456,11 @@ export default function App() {
       clearWatchdog();
       if (sleepTimerRef.current) window.clearTimeout(sleepTimerRef.current);
       if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+      stopTtsAudio();
       keepAliveEngine.stop();
       clearMediaSession();
     };
-  }, []);
+  }, [stopTtsAudio]);
 
   // Natural chapter title sorting helper (e.g., Văn án -> Chương 1 -> Chương 2 -> ... -> Ngoại truyện)
   const extractChapterOrderKey = (title: string): { hasNumber: boolean; num: number; subNum: number } => {
@@ -1975,12 +2288,18 @@ export default function App() {
               voices={voices}
               selectedVoiceName={selectedVoiceName}
               voiceProfileId={voiceProfileId}
+              voiceEnginePreference={voiceEnginePreference}
+              aiTtsStatus={aiTtsStatus}
+              isAiAudioActive={isAiAudioActive}
+              aiDownloadState={aiDownloadState}
               resolvedVoiceInfo={resolvedVoiceInfo}
               eqPreset={eqState.preset}
               eqGains={eqState.gains}
+              advFilter={advFilter}
               rate={rate}
               sleepMinutes={sleepMinutes}
               ambientMode={ambientMode}
+              ambientVolume={ambientVolume}
               wakeLockEnabled={wakeLockEnabled}
               autoPlayNext={autoPlayNext}
               blueLightFilter={blueLightFilter}
@@ -1992,7 +2311,7 @@ export default function App() {
               onSeekChunk={(idx) => {
                 setChunkIndex(idx);
                 chunkIndexRef.current = idx;
-                if (isPlaying) speakCurrentChunk(idx);
+                if (isPlaying) void speakCurrentChunk(idx);
                 else {
                   saveProgress(
                     activeStory.id,
@@ -2018,7 +2337,7 @@ export default function App() {
                   localStorage.setItem('truyen_audio_voice', name);
                 } catch {}
                 if (isPlaying && !activeChapterContent.audioBlob) {
-                  speakCurrentChunk(chunkIndexRef.current);
+                  void speakCurrentChunk(chunkIndexRef.current);
                 } else {
                   toast('Đã chọn giọng thiết bị mới');
                 }
@@ -2034,13 +2353,24 @@ export default function App() {
                   localStorage.setItem('truyen_audio_voice', '');
                 } catch {}
                 if (isPlaying && !activeChapterContent.audioBlob) {
-                  speakCurrentChunk(chunkIndexRef.current);
+                  void speakCurrentChunk(chunkIndexRef.current);
                 } else {
                   const prof = OFFLINE_VOICE_PROFILES.find((p) => p.id === id);
                   if (prof) toast(`Đã chọn giọng: ${prof.label}`);
                 }
               }}
-              onPreviewVoice={previewCurrentVoice}
+              onChangeVoiceEnginePreference={(pref) => {
+                setVoiceEnginePreference(pref);
+                voiceEnginePrefRef.current = pref;
+                try {
+                  localStorage.setItem('truyen_audio_voice_engine', pref);
+                } catch {}
+                if (isPlaying && !activeChapterContent.audioBlob) {
+                  void speakCurrentChunk(chunkIndexRef.current);
+                }
+              }}
+              onCacheChapterAiVoice={handleCacheChapterAiVoice}
+              onPreviewVoice={() => void previewCurrentVoice()}
               onSelectEqPreset={(presetId) => {
                 const found = EQ_PRESETS.find((p) => p.id === presetId);
                 if (!found) return;
@@ -2052,10 +2382,11 @@ export default function App() {
                 eqGainsRef.current = next.gains;
                 saveEqState(next);
                 updateEqualizerGainsOnAudio(nativeAudioRef.current, next.gains);
+                updateEqualizerGainsOnAudio(ttsAudioRef.current, next.gains);
                 const ambientEl = keepAliveEngine.getAudioElement();
                 if (ambientEl && ambientModeRef.current !== 'silent') {
                   if (next.gains.some((g) => g !== 0)) {
-                    void resumeAndSyncEqualizer(ambientEl, next.gains);
+                    void resumeAndSyncEqualizer(ambientEl, next.gains, { isVoiceStream: false });
                   } else {
                     updateEqualizerGainsOnAudio(ambientEl, next.gains);
                   }
@@ -2076,24 +2407,92 @@ export default function App() {
                 eqGainsRef.current = nextGains;
                 saveEqState(next);
                 updateEqualizerGainsOnAudio(nativeAudioRef.current, nextGains);
+                updateEqualizerGainsOnAudio(ttsAudioRef.current, nextGains);
                 const ambientEl = keepAliveEngine.getAudioElement();
                 if (ambientEl && ambientModeRef.current !== 'silent') {
                   if (nextGains.some((g) => g !== 0)) {
-                    void resumeAndSyncEqualizer(ambientEl, nextGains);
+                    void resumeAndSyncEqualizer(ambientEl, nextGains, { isVoiceStream: false });
                   } else {
                     updateEqualizerGainsOnAudio(ambientEl, nextGains);
                   }
                 }
               }}
-              onChangeRate={(r) => {
+              onSelectAudioFilterPreset={(presetId: Exclude<AudioFilterPresetId, 'custom'>) => {
+                const found =
+                  AUDIO_FILTER_PRESETS.find((p) => p.id === presetId) || AUDIO_FILTER_PRESETS[0];
+                const next: AdvancedAudioFilterState = {
+                  preset: found.id,
+                  denoising: found.denoising,
+                  reverb: found.reverb,
+                  voicePriority: found.voicePriority,
+                };
+                setAdvFilter(next);
+                advFilterRef.current = next;
+                saveAudioFilterState(next);
+                updateAdvancedFilterOnAudio(ttsAudioRef.current, next);
+                updateAdvancedFilterOnAudio(nativeAudioRef.current, next);
+              }}
+              onChangeDenoising={(val) => {
+                const denoising = Math.max(0, Math.min(100, Math.round(val)));
+                const prev = advFilterRef.current;
+                const next: AdvancedAudioFilterState = {
+                  preset: matchAudioFilterPreset(denoising, prev.reverb, prev.voicePriority),
+                  denoising,
+                  reverb: prev.reverb,
+                  voicePriority: prev.voicePriority,
+                };
+                setAdvFilter(next);
+                advFilterRef.current = next;
+                saveAudioFilterState(next);
+                updateAdvancedFilterOnAudio(ttsAudioRef.current, next);
+                updateAdvancedFilterOnAudio(nativeAudioRef.current, next);
+              }}
+              onChangeReverb={(val) => {
+                const reverb = Math.max(0, Math.min(100, Math.round(val)));
+                const prev = advFilterRef.current;
+                const next: AdvancedAudioFilterState = {
+                  preset: matchAudioFilterPreset(prev.denoising, reverb, prev.voicePriority),
+                  denoising: prev.denoising,
+                  reverb,
+                  voicePriority: prev.voicePriority,
+                };
+                setAdvFilter(next);
+                advFilterRef.current = next;
+                saveAudioFilterState(next);
+                updateAdvancedFilterOnAudio(ttsAudioRef.current, next);
+                updateAdvancedFilterOnAudio(nativeAudioRef.current, next);
+              }}
+              onToggleVoicePriority={() => {
+                const prev = advFilterRef.current;
+                const voicePriority = !prev.voicePriority;
+                const next: AdvancedAudioFilterState = {
+                  preset: matchAudioFilterPreset(prev.denoising, prev.reverb, voicePriority),
+                  denoising: prev.denoising,
+                  reverb: prev.reverb,
+                  voicePriority,
+                };
+                setAdvFilter(next);
+                advFilterRef.current = next;
+                saveAudioFilterState(next);
+                updateAdvancedFilterOnAudio(ttsAudioRef.current, next);
+                updateAdvancedFilterOnAudio(nativeAudioRef.current, next);
+              }}
+              onChangeRate={(rawRate) => {
+                const r = Math.min(2.5, Math.max(0.5, Math.round(rawRate * 100) / 100));
                 setRate(r);
                 rateRef.current = r;
                 try {
                   localStorage.setItem('truyen_audio_rate', String(r));
                 } catch {}
                 if (nativeAudioRef.current) nativeAudioRef.current.playbackRate = r;
-                if (isPlaying && !activeChapterContent.audioBlob) {
-                  speakCurrentChunk(chunkIndexRef.current);
+                const prof =
+                  OFFLINE_VOICE_PROFILES.find((p) => p.id === voiceProfileRef.current) ||
+                  OFFLINE_VOICE_PROFILES[0];
+                const eff = Math.min(2.5, Math.max(0.5, Number((r * prof.rateScale).toFixed(2))));
+                if (ttsAudioRef.current && isAiAudioActive) {
+                  ttsAudioRef.current.playbackRate = eff;
+                } else if (isPlaying && !activeChapterContent.audioBlob) {
+                  void speakCurrentChunk(chunkIndexRef.current);
                 }
               }}
               onChangeSleep={(mins) => {
@@ -2114,12 +2513,31 @@ export default function App() {
                 try {
                   localStorage.setItem('truyen_audio_ambient', mode);
                 } catch {}
+                const effectiveVol =
+                  advFilterRef.current.voicePriority && isPlaying
+                    ? Math.max(0.03, Number((ambientVolume * 0.65).toFixed(3)))
+                    : ambientVolume;
+                keepAliveEngine.setVolume(effectiveVol);
                 await keepAliveEngine.setMode(mode, isPlaying);
                 if (mode !== 'silent' && eqGainsRef.current.some((g) => g !== 0)) {
-                  await resumeAndSyncEqualizer(keepAliveEngine.getAudioElement(), eqGainsRef.current);
+                  await resumeAndSyncEqualizer(keepAliveEngine.getAudioElement(), eqGainsRef.current, {
+                    isVoiceStream: false,
+                  });
                 } else {
                   updateEqualizerGainsOnAudio(keepAliveEngine.getAudioElement(), eqGainsRef.current);
                 }
+              }}
+              onChangeAmbientVolume={(vol) => {
+                const clamped = Math.max(0.03, Math.min(0.45, Number(vol)));
+                setAmbientVolume(clamped);
+                const effectiveVol =
+                  advFilterRef.current.voicePriority && isPlaying
+                    ? Math.max(0.03, Number((clamped * 0.65).toFixed(3)))
+                    : clamped;
+                keepAliveEngine.setVolume(effectiveVol);
+                try {
+                  localStorage.setItem('truyen_audio_ambient_volume', String(clamped));
+                } catch {}
               }}
               onToggleWakeLock={async () => {
                 const next = !wakeLockEnabled;
@@ -2201,6 +2619,7 @@ export default function App() {
             <LibraryView
               stories={stories}
               progressMap={progressMap}
+              activeStoryId={activeStoryId}
               isOnline={isOnline}
               onOpenStory={(sid) => setSelectedStoryId(sid)}
               onResumeStory={(sid) => {

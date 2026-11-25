@@ -48,30 +48,30 @@ function createWavUrl(mode: AmbientMode): string {
       sample = i % 800 === 0 ? 1 : 0;
     } else if (mode === 'brown') {
       const white = Math.random() * 2 - 1;
-      brown = (brown + 0.025 * white) / 1.025;
+      brown = (brown + 0.022 * white) / 1.022;
       const edgeGain =
         i < fadeSamples
           ? i / fadeSamples
           : i > numSamples - fadeSamples
             ? (numSamples - i) / fadeSamples
             : 1;
-      sample = Math.round(Math.max(-1, Math.min(1, brown * 2.8 * edgeGain)) * 12500);
+      sample = Math.round(Math.max(-1, Math.min(1, brown * 2.2 * edgeGain)) * 7000);
     } else if (mode === 'rain') {
       const white = Math.random() * 2 - 1;
-      // 3-pole pink noise approximation for steady soft rain hiss
+      // 3-pole pink noise approximation for soft distant rain
       b0 = 0.99765 * b0 + white * 0.099046;
       b1 = 0.963 * b1 + white * 0.2965164;
       b2 = 0.57 * b2 + white * 1.0526913;
-      const pink = (b0 + b1 + b2 + white * 0.1848) * 0.11;
-      // Gentle high-pass shimmer + random soft raindrop patters
-      const hiss = (white - prevWhite) * 0.08;
+      const pink = (b0 + b1 + b2 + white * 0.1848) * 0.12;
+      // Subtle soft shimmer + gentle raindrop patters (kept quiet under narration)
+      const hiss = (white - prevWhite) * 0.022;
       prevWhite = white;
-      if (Math.random() > 0.9985) {
-        dropEnv = 0.35 + Math.random() * 0.45;
+      if (Math.random() > 0.9988) {
+        dropEnv = 0.25 + Math.random() * 0.35;
       } else {
         dropEnv *= 0.985;
       }
-      const droplet = dropEnv * (Math.random() * 2 - 1) * 0.35;
+      const droplet = dropEnv * (Math.random() * 2 - 1) * 0.22;
       const edgeGain =
         i < fadeSamples
           ? i / fadeSamples
@@ -79,7 +79,7 @@ function createWavUrl(mode: AmbientMode): string {
             ? (numSamples - i) / fadeSamples
             : 1;
       const mixed = (pink + hiss + droplet) * edgeGain;
-      sample = Math.round(Math.max(-1, Math.min(1, mixed)) * 13500);
+      sample = Math.round(Math.max(-1, Math.min(1, mixed)) * 7200);
     }
     view.setInt16(44 + i * 2, sample, true);
   }
@@ -92,6 +92,7 @@ class BackgroundAudioKeepAlive {
   private audioEl: HTMLAudioElement | null = null;
   private loadedMode: AmbientMode | null = null;
   private currentMode: AmbientMode = 'silent';
+  private ambientVolume = 0.12;
   private cachedUrls: Partial<Record<AmbientMode, string>> = {};
   private wakeLock: WakeLockSentinel | null = null;
   private previewTimer: number | null = null;
@@ -102,7 +103,7 @@ class BackgroundAudioKeepAlive {
       el.loop = true;
       el.setAttribute('playsinline', '');
       el.preload = 'auto';
-      el.volume = 0.02;
+      el.volume = 0.012;
       this.audioEl = el;
     }
     return this.audioEl;
@@ -113,6 +114,18 @@ class BackgroundAudioKeepAlive {
       window.clearTimeout(this.previewTimer);
       this.previewTimer = null;
     }
+  }
+
+  public setVolume(vol: number): void {
+    const clamped = Math.max(0.03, Math.min(0.5, Number.isFinite(vol) ? vol : 0.12));
+    this.ambientVolume = clamped;
+    if (this.audioEl && this.currentMode !== 'silent') {
+      this.audioEl.volume = clamped;
+    }
+  }
+
+  public getVolume(): number {
+    return this.ambientVolume;
   }
 
   public async start(mode: AmbientMode): Promise<void> {
@@ -129,7 +142,7 @@ class BackgroundAudioKeepAlive {
       el.load();
     }
     this.currentMode = mode;
-    el.volume = mode === 'silent' ? 0.015 : 0.45;
+    el.volume = mode === 'silent' ? 0.012 : this.ambientVolume;
     try {
       await el.play();
     } catch {

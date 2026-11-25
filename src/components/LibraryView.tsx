@@ -1,10 +1,13 @@
 import React, { useMemo, useState } from 'react';
 import {
+  BookOpen,
   CheckCircle2,
-  Clock,
+  ChevronDown,
+  ChevronUp,
   Cloud,
   Download,
   Headphones,
+  History,
   ListPlus,
   Play,
   Plus,
@@ -18,15 +21,27 @@ import { formatBytes } from '@/src/lib/localDb';
 import { STORY_GENRES, type ListeningProgress, type Story } from '@/src/types';
 
 type FilterMode = 'all' | 'offline' | 'in_progress';
+type HistoryScope = 'all' | 'in_progress';
+
+const HISTORY_COLLAPSED_KEY = 'truyen_audio_history_collapsed_v1';
+const HIDDEN_HISTORY_KEY = 'truyen_audio_hidden_history_v1';
 
 function computeStoryProgress(story: Story, prog?: ListeningProgress): {
   percent: number;
   currentChapter: number;
   started: boolean;
+  isCompleted: boolean;
+  remainingChapters: number;
 } {
   const totalCh = story.chapters.length;
   if (!prog || totalCh === 0) {
-    return { percent: 0, currentChapter: 0, started: false };
+    return {
+      percent: 0,
+      currentChapter: 0,
+      started: false,
+      isCompleted: false,
+      remainingChapters: totalCh,
+    };
   }
   const chIdx = Math.min(Math.max(0, prog.chapterIndex), totalCh - 1);
   const inChapter =
@@ -40,7 +55,11 @@ function computeStoryProgress(story: Story, prog?: ListeningProgress): {
   const percent = hasStarted
     ? Math.min(100, Math.max(1, Math.round(raw)))
     : 0;
-  return { percent, currentChapter: chIdx + 1, started: true };
+  const isCompleted =
+    percent >= 100 ||
+    (chIdx === totalCh - 1 && prog.totalChunks > 0 && prog.chunkIndex >= prog.totalChunks - 1);
+  const remainingChapters = Math.max(0, totalCh - 1 - chIdx);
+  return { percent, currentChapter: chIdx + 1, started: true, isCompleted, remainingChapters };
 }
 
 function formatRelativeTime(timestamp: number): string {
@@ -58,6 +77,7 @@ function formatRelativeTime(timestamp: number): string {
 interface Props {
   stories: Story[];
   progressMap: Record<string, ListeningProgress>;
+  activeStoryId?: string | null;
   isOnline: boolean;
   onOpenStory: (storyId: string) => void;
   onResumeStory: (storyId: string) => void;
@@ -73,6 +93,7 @@ const CUSTOM_GENRE_VALUE = '__custom__';
 export const LibraryView: React.FC<Props> = ({
   stories,
   progressMap,
+  activeStoryId,
   isOnline,
   onOpenStory,
   onResumeStory,
@@ -85,6 +106,25 @@ export const LibraryView: React.FC<Props> = ({
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<FilterMode>(() => (isOnline ? 'all' : 'offline'));
   const [genreFilter, setGenreFilter] = useState<string>('all');
+  const [historyScope, setHistoryScope] = useState<HistoryScope>('all');
+  const [historyExpanded, setHistoryExpanded] = useState(false);
+  const [historyCollapsed, setHistoryCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(HISTORY_COLLAPSED_KEY) === '1';
+    } catch {
+      return false;
+    }
+  });
+  const [hiddenHistoryMap, setHiddenHistoryMap] = useState<Record<string, number>>(() => {
+    try {
+      const raw = localStorage.getItem(HIDDEN_HISTORY_KEY);
+      if (!raw) return {};
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      return {};
+    }
+  });
   const [showNewModal, setShowNewModal] = useState(false);
   const [newTitle, setNewTitle] = useState('');
   const [newAuthor, setNewAuthor] = useState('');
@@ -92,6 +132,39 @@ export const LibraryView: React.FC<Props> = ({
   const [newCustomGenre, setNewCustomGenre] = useState('');
   const [newCover, setNewCover] = useState<File | undefined>(undefined);
   const [creating, setCreating] = useState(false);
+
+  const toggleHistoryCollapsed = () => {
+    setHistoryCollapsed((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem(HISTORY_COLLAPSED_KEY, next ? '1' : '0');
+      } catch {
+        // ignore storage errors
+      }
+      return next;
+    });
+  };
+
+  const handleDismissHistoryItem = (storyId: string, updatedAt: number) => {
+    setHiddenHistoryMap((prev) => {
+      const next = { ...prev, [storyId]: updatedAt };
+      try {
+        localStorage.setItem(HIDDEN_HISTORY_KEY, JSON.stringify(next));
+      } catch {
+        // ignore storage errors
+      }
+      return next;
+    });
+  };
+
+  const handleRestoreHiddenHistory = () => {
+    setHiddenHistoryMap({});
+    try {
+      localStorage.removeItem(HIDDEN_HISTORY_KEY);
+    } catch {
+      // ignore storage errors
+    }
+  };
 
   const usedGenreOptions = useMemo(() => {
     const counts = new Map<string, number>();
@@ -122,18 +195,51 @@ export const LibraryView: React.FC<Props> = ({
     [stories]
   );
 
-  const recentlyListened = useMemo(() => {
+  const { listeningHistory, hiddenHistoryCount } = useMemo(() => {
     const storyById = new Map<string, Story>(stories.map((s) => [s.id, s]));
-    return Object.values(progressMap)
+    let hiddenCount = 0;
+    const items = Object.values(progressMap)
       .sort((a, b) => b.updatedAt - a.updatedAt)
       .map((progress) => {
         const story = storyById.get(progress.storyId);
         if (!story || story.chapters.length === 0) return null;
-        return { story, progress };
+        const hiddenAt = hiddenHistoryMap[progress.storyId];
+        if (typeof hiddenAt === 'number' && hiddenAt >= progress.updatedAt) {
+          hiddenCount++;
+          return null;
+        }
+        const progInfo = computeStoryProgress(story, progress);
+        return { story, progress, progInfo };
       })
-      .filter((item): item is { story: Story; progress: ListeningProgress } => item !== null)
-      .slice(0, 10);
-  }, [progressMap, stories]);
+      .filter(
+        (
+          item
+        ): item is {
+          story: Story;
+          progress: ListeningProgress;
+          progInfo: ReturnType<typeof computeStoryProgress>;
+        } => item !== null
+      )
+      .slice(0, 20);
+    return { listeningHistory: items, hiddenHistoryCount: hiddenCount };
+  }, [progressMap, stories, hiddenHistoryMap]);
+
+  const inProgressHistoryCount = useMemo(
+    () => listeningHistory.filter((item) => !item.progInfo.isCompleted).length,
+    [listeningHistory]
+  );
+
+  const filteredHistory = useMemo(() => {
+    if (historyScope === 'in_progress') {
+      return listeningHistory.filter((item) => !item.progInfo.isCompleted);
+    }
+    return listeningHistory;
+  }, [listeningHistory, historyScope]);
+
+  const visibleHistory = useMemo(
+    () => (historyExpanded ? filteredHistory : filteredHistory.slice(0, 5)),
+    [filteredHistory, historyExpanded]
+  );
 
   const normalizeSearchText = (value: string) =>
     value
@@ -223,103 +329,284 @@ export const LibraryView: React.FC<Props> = ({
         </button>
       </div>
 
-      {/* Recently Listened Section (last 10 stories played) */}
-      {recentlyListened.length > 0 && (
-        <section aria-label="Nghe gần đây" className="space-y-3">
-          <div className="flex items-center justify-between gap-2 px-0.5">
-            <div className="flex items-center gap-2">
-              <Clock className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
-              <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100">
-                Nghe gần đây
-              </h3>
+      {/* Listening History Section */}
+      {(stories.length > 0 || listeningHistory.length > 0) && (
+        <section
+          aria-label="Lịch sử nghe"
+          className="rounded-2xl bg-white dark:bg-[#1a1d24] border border-slate-200 dark:border-slate-800 overflow-hidden"
+        >
+          <div className="px-4 py-3.5 border-b border-slate-100 dark:border-slate-800/80 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <History className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
+              <div className="min-w-0">
+                <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100 leading-tight">
+                  Lịch sử nghe
+                </h3>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5 tabular-nums">
+                  {listeningHistory.length === 0
+                    ? 'Chưa có truyện nào được phát gần đây'
+                    : `${listeningHistory.length} truyện gần đây · ${inProgressHistoryCount} đang dang dở`}
+                </p>
+              </div>
             </div>
-            <span className="text-xs text-slate-500 dark:text-slate-400 tabular-nums">
-              {recentlyListened.length}/10 truyện gần nhất
-            </span>
+
+            <div className="flex items-center gap-2 shrink-0">
+              {listeningHistory.length > 0 && !historyCollapsed && (
+                <div
+                  role="tablist"
+                  aria-label="Lọc lịch sử nghe"
+                  className="inline-flex items-center gap-1 p-1 rounded-xl bg-slate-100 dark:bg-[#111318] border border-slate-200/80 dark:border-slate-800"
+                >
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={historyScope === 'all'}
+                    onClick={() => setHistoryScope('all')}
+                    className={`min-h-[36px] px-3 rounded-lg text-xs font-semibold transition whitespace-nowrap shrink-0 cursor-pointer ${
+                      historyScope === 'all'
+                        ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-xs'
+                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+                    }`}
+                  >
+                    Tất cả
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={historyScope === 'in_progress'}
+                    onClick={() => setHistoryScope('in_progress')}
+                    className={`min-h-[36px] px-3 rounded-lg text-xs font-semibold transition whitespace-nowrap shrink-0 cursor-pointer ${
+                      historyScope === 'in_progress'
+                        ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-xs'
+                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+                    }`}
+                  >
+                    Đang dang dở ({inProgressHistoryCount})
+                  </button>
+                </div>
+              )}
+
+              <button
+                type="button"
+                onClick={toggleHistoryCollapsed}
+                aria-expanded={!historyCollapsed}
+                aria-label={historyCollapsed ? 'Mở rộng lịch sử nghe' : 'Thu gọn lịch sử nghe'}
+                className="min-h-[44px] px-3 rounded-xl border border-slate-200 dark:border-slate-800 text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800/70 inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <span>{historyCollapsed ? 'Mở rộng' : 'Thu gọn'}</span>
+                {historyCollapsed ? (
+                  <ChevronDown className="w-4 h-4" />
+                ) : (
+                  <ChevronUp className="w-4 h-4" />
+                )}
+              </button>
+            </div>
           </div>
 
-          <div className="flex gap-3 overflow-x-auto pb-2 snap-x snap-mandatory">
-            {recentlyListened.map(({ story, progress }, idx) => {
-              const progInfo = computeStoryProgress(story, progress);
-              return (
-                <div
-                  key={story.id}
-                  onClick={() => onOpenStory(story.id)}
-                  className="w-72 sm:w-80 shrink-0 snap-start rounded-2xl bg-white dark:bg-[#1a1d24] border border-slate-200 dark:border-slate-800 p-3.5 flex flex-col justify-between gap-3 hover:border-blue-500/60 transition-colors cursor-pointer"
-                >
-                  <div className="flex items-start gap-3 min-w-0">
-                    <StoryCover
-                      title={story.title}
-                      cover={story.cover}
-                      className="w-12 h-16 rounded-xl shrink-0"
-                    />
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center justify-between gap-1.5 text-[11px]">
-                        <span
-                          className={`font-semibold truncate ${
-                            idx === 0
-                              ? 'text-blue-600 dark:text-blue-400'
-                              : 'text-slate-500 dark:text-slate-400'
-                          }`}
-                        >
-                          {idx === 0 ? 'Nghe mới nhất' : formatRelativeTime(progress.updatedAt)}
-                        </span>
-                        {progress.deviceName && (
-                          <span className="text-slate-400 dark:text-slate-500 truncate max-w-[96px]">
-                            {progress.deviceName}
-                          </span>
-                        )}
-                      </div>
-                      <h4 className="text-sm font-semibold text-slate-900 dark:text-slate-100 truncate mt-0.5">
-                        {story.title}
-                      </h4>
-                      <p className="text-xs text-slate-600 dark:text-slate-400 truncate mt-0.5 tabular-nums">
-                        Ch. {progInfo.currentChapter}/{story.chapters.length}
-                        {progress.chapterTitle ? ` · ${progress.chapterTitle}` : ''}
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="space-y-2">
-                    <div className="flex items-center gap-2">
-                      <div
-                        role="progressbar"
-                        aria-valuenow={progInfo.percent}
-                        aria-valuemin={0}
-                        aria-valuemax={100}
-                        aria-label={`Tiến độ nghe ${story.title}`}
-                        className="h-1.5 flex-1 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden"
-                      >
-                        <div
-                          className={`h-full rounded-full transition-all duration-300 ${
-                            progInfo.percent >= 100
-                              ? 'bg-emerald-500'
-                              : 'bg-blue-600 dark:bg-blue-500'
-                          }`}
-                          style={{ width: `${progInfo.percent}%` }}
-                        />
-                      </div>
-                      <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 tabular-nums shrink-0">
-                        {progInfo.percent}%
-                      </span>
-                    </div>
-
+          {!historyCollapsed && (
+            <>
+              {listeningHistory.length === 0 ? (
+                <div className="px-4 py-6 text-center space-y-2">
+                  <p className="text-sm text-slate-600 dark:text-slate-400">
+                    Khi bạn nghe bất kỳ chương truyện nào, tiến độ sẽ tự động lưu tại đây để tiếp tục nghe dở bất cứ lúc nào.
+                  </p>
+                  {hiddenHistoryCount > 0 && (
                     <button
                       type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onResumeStory(story.id);
-                      }}
-                      className="w-full min-h-[38px] px-3 rounded-xl bg-blue-600/10 dark:bg-blue-500/15 text-blue-700 dark:text-blue-300 hover:bg-blue-600 hover:text-white dark:hover:bg-blue-600 dark:hover:text-white text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                      onClick={handleRestoreHiddenHistory}
+                      className="min-h-[40px] px-3.5 rounded-xl text-xs font-semibold text-blue-600 dark:text-blue-400 hover:bg-blue-500/10 cursor-pointer"
                     >
-                      <Play className="w-3.5 h-3.5" />
-                      <span>Nghe tiếp Ch. {progInfo.currentChapter}</span>
+                      Khôi phục {hiddenHistoryCount} truyện đã ẩn khỏi lịch sử
                     </button>
-                  </div>
+                  )}
                 </div>
-              );
-            })}
-          </div>
+              ) : filteredHistory.length === 0 ? (
+                <div className="px-4 py-6 text-center space-y-2">
+                  <p className="text-sm text-slate-600 dark:text-slate-400">
+                    Tất cả truyện trong lịch sử đều đã nghe xong.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setHistoryScope('all')}
+                    className="min-h-[40px] px-3.5 rounded-xl text-xs font-semibold text-blue-600 dark:text-blue-400 hover:bg-blue-500/10 cursor-pointer"
+                  >
+                    Xem toàn bộ lịch sử nghe
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <ul className="divide-y divide-slate-100 dark:divide-slate-800/80">
+                    {visibleHistory.map(({ story, progress, progInfo }, idx) => {
+                      const isActive = activeStoryId === story.id;
+                      const currentChapterObj = story.chapters[progInfo.currentChapter - 1];
+                      const chapterLabel =
+                        progress.chapterTitle || currentChapterObj?.title || `Chương ${progInfo.currentChapter}`;
+                      return (
+                        <li
+                          key={story.id}
+                          className="px-4 py-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:bg-slate-50/80 dark:hover:bg-slate-800/30 transition-colors"
+                        >
+                          <div
+                            onClick={() => onOpenStory(story.id)}
+                            className="flex items-start gap-3 min-w-0 flex-1 cursor-pointer"
+                          >
+                            <StoryCover
+                              title={story.title}
+                              cover={story.cover}
+                              className="w-12 h-16 rounded-xl shrink-0"
+                            />
+                            <div className="min-w-0 flex-1">
+                              <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs">
+                                <span
+                                  className={`font-semibold ${
+                                    isActive || idx === 0
+                                      ? 'text-blue-600 dark:text-blue-400'
+                                      : 'text-slate-600 dark:text-slate-300'
+                                  }`}
+                                >
+                                  {isActive
+                                    ? 'Đang phát'
+                                    : idx === 0
+                                      ? 'Nghe mới nhất'
+                                      : formatRelativeTime(progress.updatedAt)}
+                                </span>
+                                <span aria-hidden="true" className="text-slate-400">
+                                  ·
+                                </span>
+                                <span
+                                  className={
+                                    progInfo.isCompleted
+                                      ? 'font-medium text-emerald-600 dark:text-emerald-400'
+                                      : 'font-medium text-amber-600 dark:text-amber-400'
+                                  }
+                                >
+                                  {progInfo.isCompleted ? 'Đã nghe xong' : 'Đang dang dở'}
+                                </span>
+                                {progress.deviceName && (
+                                  <>
+                                    <span aria-hidden="true" className="text-slate-400">
+                                      ·
+                                    </span>
+                                    <span className="text-slate-500 dark:text-slate-400 truncate max-w-[140px]">
+                                      {progress.deviceName}
+                                    </span>
+                                  </>
+                                )}
+                              </div>
+
+                              <h4 className="text-sm font-semibold text-slate-900 dark:text-slate-100 truncate mt-0.5">
+                                {story.title}
+                              </h4>
+
+                              <p className="text-xs text-slate-600 dark:text-slate-400 truncate mt-0.5 tabular-nums">
+                                Ch. {progInfo.currentChapter}/{story.chapters.length}: {chapterLabel}
+                                {progInfo.remainingChapters > 0
+                                  ? ` · Còn ${progInfo.remainingChapters} chương`
+                                  : ''}
+                              </p>
+
+                              <div className="mt-2 flex items-center gap-2 max-w-md">
+                                <div
+                                  role="progressbar"
+                                  aria-valuenow={progInfo.percent}
+                                  aria-valuemin={0}
+                                  aria-valuemax={100}
+                                  aria-label={`Tiến độ nghe ${story.title}`}
+                                  className="h-1.5 flex-1 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden"
+                                >
+                                  <div
+                                    className={`h-full rounded-full transition-all duration-300 ${
+                                      progInfo.isCompleted
+                                        ? 'bg-emerald-500'
+                                        : 'bg-blue-600 dark:bg-blue-500'
+                                    }`}
+                                    style={{ width: `${progInfo.percent}%` }}
+                                  />
+                                </div>
+                                <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 tabular-nums shrink-0">
+                                  {progInfo.percent}%
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center justify-end gap-1.5 shrink-0 pl-15 sm:pl-0">
+                            <button
+                              type="button"
+                              onClick={() => onResumeStory(story.id)}
+                              className="min-h-[44px] px-3.5 rounded-xl bg-blue-600 text-white hover:bg-blue-700 active:scale-[0.98] text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition whitespace-nowrap shrink-0 cursor-pointer"
+                            >
+                              <Play className="w-3.5 h-3.5" />
+                              <span>
+                                {progInfo.isCompleted
+                                  ? 'Nghe lại'
+                                  : `Nghe tiếp Ch. ${progInfo.currentChapter}`}
+                              </span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => onOpenStory(story.id)}
+                              title="Mở chi tiết & mục lục truyện"
+                              aria-label={`Mở mục lục ${story.title}`}
+                              className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-xl border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+                            >
+                              <BookOpen className="w-4 h-4" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleDismissHistoryItem(story.id, progress.updatedAt)
+                              }
+                              title="Ẩn khỏi lịch sử nghe"
+                              aria-label={`Ẩn ${story.title} khỏi lịch sử nghe`}
+                              className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-xl text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+                            >
+                              <X className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </li>
+                      );
+                    })}
+                  </ul>
+
+                  {(filteredHistory.length > 5 || hiddenHistoryCount > 0) && (
+                    <div className="px-4 py-2.5 border-t border-slate-100 dark:border-slate-800/80 flex flex-wrap items-center justify-between gap-2 bg-slate-50/50 dark:bg-[#151820]/60">
+                      {filteredHistory.length > 5 ? (
+                        <button
+                          type="button"
+                          onClick={() => setHistoryExpanded((v) => !v)}
+                          className="min-h-[40px] px-2 text-xs font-semibold text-blue-600 dark:text-blue-400 hover:underline inline-flex items-center gap-1 cursor-pointer"
+                        >
+                          {historyExpanded ? (
+                            <>
+                              <span>Thu gọn danh sách</span>
+                              <ChevronUp className="w-3.5 h-3.5" />
+                            </>
+                          ) : (
+                            <>
+                              <span>Xem tất cả {filteredHistory.length} truyện trong lịch sử</span>
+                              <ChevronDown className="w-3.5 h-3.5" />
+                            </>
+                          )}
+                        </button>
+                      ) : (
+                        <span />
+                      )}
+                      {hiddenHistoryCount > 0 && (
+                        <button
+                          type="button"
+                          onClick={handleRestoreHiddenHistory}
+                          className="min-h-[40px] px-2 text-xs font-medium text-slate-500 dark:text-slate-400 hover:text-blue-600 dark:hover:text-blue-400 cursor-pointer"
+                        >
+                          Khôi phục {hiddenHistoryCount} mục đã ẩn
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+            </>
+          )}
         </section>
       )}
 

@@ -7,7 +7,7 @@ import type {
 } from '@/src/types';
 
 const DB_NAME = 'truyen-audio-v2';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 const STORES = {
   STORIES: 'stories',
@@ -15,6 +15,7 @@ const STORES = {
   PLAYLISTS: 'playlists',
   PROGRESS: 'progress',
   SYNC_QUEUE: 'syncQueue',
+  TTS_CACHE: 'ttsCache',
 } as const;
 
 let dbPromise: Promise<IDBDatabase> | null = null;
@@ -40,6 +41,10 @@ function openLocalDB(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(STORES.SYNC_QUEUE)) {
         db.createObjectStore(STORES.SYNC_QUEUE, { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains(STORES.TTS_CACHE)) {
+        const ttsStore = db.createObjectStore(STORES.TTS_CACHE, { keyPath: 'key' });
+        ttsStore.createIndex('byChapter', 'chapterId', { unique: false });
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -189,11 +194,46 @@ export async function removeSyncQueueItem(id: string): Promise<void> {
   await txDone(tx);
 }
 
+export interface CachedTtsAudioEntry {
+  key: string;
+  chapterId: string;
+  voiceProfileId: string;
+  blob: Blob;
+  updatedAt: number;
+}
+
+export function makeTtsCacheKey(voiceProfileId: string, text: string): string {
+  const normalized = text.trim();
+  let hash = 2166136261;
+  for (let i = 0; i < normalized.length; i++) {
+    hash ^= normalized.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${voiceProfileId}_${normalized.length}_${(hash >>> 0).toString(36)}`;
+}
+
+export async function getCachedTtsAudio(key: string): Promise<Blob | undefined> {
+  const db = await openLocalDB();
+  const tx = db.transaction(STORES.TTS_CACHE, 'readonly');
+  const entry = await txRequest<CachedTtsAudioEntry | undefined>(
+    tx.objectStore(STORES.TTS_CACHE).get(key)
+  );
+  return entry?.blob;
+}
+
+export async function putCachedTtsAudio(entry: CachedTtsAudioEntry): Promise<void> {
+  const db = await openLocalDB();
+  const tx = db.transaction(STORES.TTS_CACHE, 'readwrite');
+  tx.objectStore(STORES.TTS_CACHE).put(entry);
+  await txDone(tx);
+}
+
 export async function clearAllOfflineChapters(): Promise<void> {
   const db = await openLocalDB();
   const stories = await getAllStories();
-  const tx = db.transaction([STORES.STORIES, STORES.CHAPTERS], 'readwrite');
+  const tx = db.transaction([STORES.STORIES, STORES.CHAPTERS, STORES.TTS_CACHE], 'readwrite');
   tx.objectStore(STORES.CHAPTERS).clear();
+  tx.objectStore(STORES.TTS_CACHE).clear();
   for (const s of stories) {
     const updated: Story = {
       ...s,
