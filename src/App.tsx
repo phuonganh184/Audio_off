@@ -11,6 +11,7 @@ import {
 } from 'firebase/auth';
 import { registerSW } from 'virtual:pwa-register';
 import {
+  BarChart3,
   BookOpen,
   Cloud,
   HardDrive,
@@ -26,10 +27,17 @@ import { OfflineManagerView } from '@/src/components/OfflineManagerView';
 import { PlaylistsView } from '@/src/components/PlaylistsView';
 import { PWAInstallButton } from '@/src/components/PWAInstallButton';
 import { ReaderPlayerView } from '@/src/components/ReaderPlayerView';
+import { StatsView } from '@/src/components/StatsView';
 import { StoryDetailView } from '@/src/components/StoryDetailView';
 import { SyncSettingsView } from '@/src/components/SyncSettingsView';
 import { useOnlineStatus } from '@/src/hooks/useOnlineStatus';
 import { useTheme } from '@/src/hooks/useTheme';
+import {
+  clearStoredListeningStats,
+  loadStoredListeningStats,
+  recordListeningSeconds,
+  type StoredListeningStats,
+} from '@/src/lib/listeningStats';
 import {
   loadSavedAudioFilterState,
   loadSavedEqState,
@@ -48,6 +56,14 @@ import {
   keepAliveEngine,
   updateMediaSession,
 } from '@/src/lib/backgroundAudio';
+import {
+  isWithinNightSchedule,
+  loadNightSchedule,
+  loadNightSessionSnapshot,
+  saveNightSchedule,
+  saveNightSessionSnapshot,
+  type NightSessionSnapshot,
+} from '@/src/lib/nightSchedule';
 import {
   clearProfileSyncCache,
   deletePlaylistFromCloud,
@@ -71,11 +87,13 @@ import {
 } from '@/src/lib/firebase';
 import {
   clearAllOfflineChapters,
+  deleteBookmarkLocal,
   deleteChapterContent,
   deletePlaylistLocal,
   deleteStoryLocal,
   enqueueSync,
   exportBackupData,
+  getAllBookmarks,
   getAllPlaylists,
   getAllProgress,
   getAllStories,
@@ -85,6 +103,7 @@ import {
   getSyncQueue,
   importBackupData,
   makeTtsCacheKey,
+  putBookmark,
   putCachedTtsAudio,
   putChapterContent,
   putPlaylist,
@@ -107,11 +126,13 @@ import {
   type AdvancedAudioFilterState,
   type AmbientMode,
   type AudioFilterPresetId,
+  type ChapterBookmark,
   type ChapterContent,
   type ChapterSummary,
   type EqPresetId,
   type ListeningProgress,
   type NavTab,
+  type NightScheduleConfig,
   type PlaybackContext,
   type Playlist,
   type PlaylistItem,
@@ -187,6 +208,7 @@ export default function App() {
 
   const [stories, setStories] = useState<Story[]>([]);
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
+  const [bookmarks, setBookmarks] = useState<ChapterBookmark[]>([]);
   const [progressMap, setProgressMap] = useState<Record<string, ListeningProgress>>({});
   const [pendingSyncCount, setPendingSyncCount] = useState(0);
   const [storageStats, setStorageStats] = useState({
@@ -233,6 +255,9 @@ export default function App() {
   const [chunks, setChunks] = useState<TextChunk[]>([]);
   const [chunkIndex, setChunkIndex] = useState<number>(0);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [listeningStats, setListeningStats] = useState<StoredListeningStats>(() =>
+    loadStoredListeningStats()
+  );
   const [playbackContext, setPlaybackContext] = useState<PlaybackContext>({ mode: 'story' });
   const [shuffleEnabled, setShuffleEnabled] = useState(false);
   const [repeatEnabled, setRepeatEnabled] = useState(false);
@@ -308,6 +333,10 @@ export default function App() {
       return false;
     }
   });
+  const [nightSchedule, setNightSchedule] = useState<NightScheduleConfig>(() => loadNightSchedule());
+  const [nightScheduleActive, setNightScheduleActive] = useState<boolean>(() =>
+    isWithinNightSchedule(loadNightSchedule())
+  );
   const [eqState, setEqState] = useState<EqState>(() => loadSavedEqState());
   const [advFilter, setAdvFilter] = useState<AdvancedAudioFilterState>(() =>
     loadSavedAudioFilterState()
@@ -351,6 +380,10 @@ export default function App() {
   const deviceNameRef = useRef(deviceName);
   const storiesRef = useRef(stories);
   const playlistsRef = useRef(playlists);
+  const themeRef = useRef(theme);
+  const blueLightFilterRef = useRef(blueLightFilter);
+  const nightScheduleRef = useRef(nightSchedule);
+  const nightSnapshotRef = useRef<NightSessionSnapshot>(loadNightSessionSnapshot());
 
   playingRef.current = isPlaying;
   chunkIndexRef.current = chunkIndex;
@@ -374,6 +407,9 @@ export default function App() {
   deviceNameRef.current = deviceName;
   storiesRef.current = stories;
   playlistsRef.current = playlists;
+  themeRef.current = theme;
+  blueLightFilterRef.current = blueLightFilter;
+  nightScheduleRef.current = nightSchedule;
 
   const toast = useCallback((msg: string) => {
     setToastMsg(msg);
@@ -381,20 +417,156 @@ export default function App() {
     toastTimerRef.current = window.setTimeout(() => setToastMsg(null), 3600);
   }, []);
 
+  const reconcileNightSchedule = useCallback(
+    (schedule: NightScheduleConfig, notifyOnTransition: boolean) => {
+      const inWindow = isWithinNightSchedule(schedule);
+      setNightScheduleActive(inWindow);
+
+      const snap = { ...nightSnapshotRef.current };
+      let activated = false;
+      let restored = false;
+
+      const shouldApplyDark = schedule.enabled && inWindow && schedule.enableDarkMode;
+      if (shouldApplyDark && !snap.appliedDark) {
+        snap.previousTheme = themeRef.current;
+        snap.appliedDark = true;
+        if (themeRef.current !== 'dark') {
+          setTheme('dark');
+          themeRef.current = 'dark';
+        }
+        activated = true;
+      } else if (!shouldApplyDark && snap.appliedDark) {
+        const restoreTheme = snap.previousTheme;
+        snap.appliedDark = false;
+        snap.previousTheme = undefined;
+        if (restoreTheme && restoreTheme !== 'dark') {
+          setTheme(restoreTheme);
+          themeRef.current = restoreTheme;
+        }
+        restored = true;
+      }
+
+      const shouldApplyBlue = schedule.enabled && inWindow && schedule.enableBlueLightFilter;
+      if (shouldApplyBlue && !snap.appliedBlueLight) {
+        snap.previousBlueLight = blueLightFilterRef.current;
+        snap.appliedBlueLight = true;
+        if (!blueLightFilterRef.current) {
+          setBlueLightFilter(true);
+          blueLightFilterRef.current = true;
+          try {
+            localStorage.setItem('truyen_audio_blue_light', 'true');
+          } catch {}
+        }
+        activated = true;
+      } else if (!shouldApplyBlue && snap.appliedBlueLight) {
+        const restoreBlue = snap.previousBlueLight ?? false;
+        snap.appliedBlueLight = false;
+        snap.previousBlueLight = undefined;
+        setBlueLightFilter(restoreBlue);
+        blueLightFilterRef.current = restoreBlue;
+        try {
+          localStorage.setItem('truyen_audio_blue_light', String(restoreBlue));
+        } catch {}
+        restored = true;
+      }
+
+      nightSnapshotRef.current = snap;
+      saveNightSessionSnapshot(snap);
+
+      if (notifyOnTransition) {
+        if (activated) {
+          toast(`Đã bật chế độ ban đêm theo lịch (${schedule.startTime} – ${schedule.endTime})`);
+        } else if (restored) {
+          toast('Đã kết thúc lịch ban đêm, khôi phục giao diện ban ngày');
+        }
+      }
+    },
+    [setTheme, toast]
+  );
+
+  const handleChangeNightSchedule = useCallback(
+    (next: NightScheduleConfig) => {
+      setNightSchedule(next);
+      nightScheduleRef.current = next;
+      saveNightSchedule(next);
+      reconcileNightSchedule(next, true);
+    },
+    [reconcileNightSchedule]
+  );
+
+  useEffect(() => {
+    reconcileNightSchedule(nightScheduleRef.current, false);
+    const check = () => reconcileNightSchedule(nightScheduleRef.current, true);
+    const timer = window.setInterval(check, 15000);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') check();
+    };
+    window.addEventListener('focus', check);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('focus', check);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [reconcileNightSchedule]);
+
   const refreshLocalData = useCallback(async () => {
-    const [st, pl, pr, sq, stats] = await Promise.all([
+    const [st, pl, pr, bm, sq, stats] = await Promise.all([
       getAllStories(),
       getAllPlaylists(),
       getAllProgress(),
+      getAllBookmarks(),
       getSyncQueue(),
       getStorageStats(),
     ]);
     setStories(st);
     setPlaylists(pl);
     setProgressMap(pr);
+    setBookmarks(bm);
     setPendingSyncCount(sq.length);
     setStorageStats(stats);
   }, []);
+
+  const handleAddBookmark = useCallback(
+    async (payload: {
+      storyId: string;
+      storyTitle: string;
+      chapterId: string;
+      chapterIndex: number;
+      chapterTitle: string;
+      chunkIndex: number;
+      audioTime: number;
+      excerpt: string;
+      note?: string;
+    }) => {
+      const bm: ChapterBookmark = {
+        id: `bm_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        storyId: payload.storyId,
+        storyTitle: payload.storyTitle,
+        chapterId: payload.chapterId,
+        chapterIndex: payload.chapterIndex,
+        chapterTitle: payload.chapterTitle,
+        chunkIndex: payload.chunkIndex,
+        audioTime: payload.audioTime,
+        excerpt: payload.excerpt,
+        note: payload.note?.trim() || undefined,
+        createdAt: Date.now(),
+      };
+      await putBookmark(bm);
+      await refreshLocalData();
+      toast('Đã lưu bookmark đoạn tâm đắc');
+    },
+    [refreshLocalData, toast]
+  );
+
+  const handleDeleteBookmark = useCallback(
+    async (bookmarkId: string) => {
+      await deleteBookmarkLocal(bookmarkId);
+      await refreshLocalData();
+      toast('Đã xóa bookmark');
+    },
+    [refreshLocalData, toast]
+  );
 
   // Register PWA Service Worker & initial local load
   useEffect(() => {
@@ -444,6 +616,26 @@ export default function App() {
         : ambientVolume;
     keepAliveEngine.setVolume(effectiveVol);
   }, [ambientVolume, advFilter.voicePriority, isPlaying]);
+
+  useEffect(() => {
+    if (!isPlaying || !activeStoryId) return;
+    let lastTickMs = Date.now();
+    const flushElapsed = () => {
+      const now = Date.now();
+      const deltaSec = Math.floor((now - lastTickMs) / 1000);
+      if (deltaSec >= 1) {
+        lastTickMs += deltaSec * 1000;
+        const cappedSec = Math.min(deltaSec, 30);
+        const updated = recordListeningSeconds(activeStoryId, cappedSec, now);
+        setListeningStats(updated);
+      }
+    };
+    const timer = window.setInterval(flushElapsed, 5000);
+    return () => {
+      window.clearInterval(timer);
+      flushElapsed();
+    };
+  }, [isPlaying, activeStoryId]);
 
   useEffect(() => {
     if (!isOnline) return;
@@ -1182,7 +1374,8 @@ export default function App() {
       storyId: string,
       chapterIdx: number,
       autoPlay: boolean,
-      ctx: PlaybackContext = { mode: 'story' }
+      ctx: PlaybackContext = { mode: 'story' },
+      overridePos?: { chunkIndex?: number; audioTime?: number }
     ) => {
       const targetStory = storiesRef.current.find((s) => s.id === storyId);
       if (!targetStory) return;
@@ -1238,17 +1431,24 @@ export default function App() {
       const parsedChunks = chunkChapterText(content.text);
       const savedProg = progressMap[storyId];
       const initialChunk =
-        savedProg && savedProg.chapterIndex === chapterIdx && savedProg.chunkIndex < parsedChunks.length
-          ? savedProg.chunkIndex
-          : 0;
+        overridePos?.chunkIndex !== undefined
+          ? Math.min(Math.max(0, overridePos.chunkIndex), Math.max(0, parsedChunks.length - 1))
+          : savedProg && savedProg.chapterIndex === chapterIdx && savedProg.chunkIndex < parsedChunks.length
+            ? savedProg.chunkIndex
+            : 0;
       const initialAudioTime =
-        savedProg && savedProg.chapterIndex === chapterIdx ? savedProg.audioTime || 0 : 0;
+        overridePos?.audioTime !== undefined
+          ? Math.max(0, overridePos.audioTime)
+          : savedProg && savedProg.chapterIndex === chapterIdx
+            ? savedProg.audioTime || 0
+            : 0;
 
       setActiveStoryId(storyId);
       setActiveChapterIndex(chapterIdx);
       setActiveChapterContent(content);
       setChunks(parsedChunks);
       setChunkIndex(initialChunk);
+      setAudioCurrentTime(initialAudioTime);
       setPlaybackContext(ctx);
       setSelectedStoryId(storyId);
       setIsReaderOpen(true);
@@ -2035,6 +2235,7 @@ export default function App() {
     }
     await refreshLocalData();
     toast(`Đã tạo danh sách “${pl.name}”`);
+    return pl;
   };
 
   const handleUpdatePlaylist = async (pl: Playlist) => {
@@ -2167,9 +2368,15 @@ export default function App() {
     return playlists.find((p) => p.id === playbackContext.playlistId)?.name;
   }, [playbackContext, playlists]);
 
-  const navItems: { id: NavTab; label: string; Icon: React.FC<{ className?: string }> }[] = [
+  const navItems: {
+    id: NavTab;
+    label: string;
+    mobileLabel?: string;
+    Icon: React.FC<{ className?: string }>;
+  }[] = [
     { id: 'library', label: 'Thư viện', Icon: BookOpen },
-    { id: 'playlists', label: 'Danh sách phát', Icon: ListMusic },
+    { id: 'playlists', label: 'Danh sách phát', mobileLabel: 'Danh sách', Icon: ListMusic },
+    { id: 'stats', label: 'Thống kê', Icon: BarChart3 },
     { id: 'offline', label: 'Ngoại tuyến', Icon: HardDrive },
     { id: 'sync', label: 'Đồng bộ', Icon: Cloud },
   ];
@@ -2574,6 +2781,26 @@ export default function App() {
                   return next;
                 });
               }}
+              nightSchedule={nightSchedule}
+              nightScheduleActive={nightScheduleActive}
+              onChangeNightSchedule={handleChangeNightSchedule}
+              chapterBookmarks={bookmarks.filter(
+                (b) => b.storyId === activeStory.id && b.chapterId === activeChapterContent.id
+              )}
+              onAddBookmark={(excerpt, note) =>
+                handleAddBookmark({
+                  storyId: activeStory.id,
+                  storyTitle: activeStory.title,
+                  chapterId: activeChapterContent.id,
+                  chapterIndex: activeChapterIndex,
+                  chapterTitle: activeChapterContent.title,
+                  chunkIndex,
+                  audioTime: audioCurrentTime,
+                  excerpt,
+                  note,
+                })
+              }
+              onDeleteBookmark={handleDeleteBookmark}
             />
           ) : tab === 'library' && selectedStory ? (
             <StoryDetailView
@@ -2592,6 +2819,10 @@ export default function App() {
               onOpenStory={(sid) => {
                 setSelectedStoryId(sid);
                 window.scrollTo({ top: 0, behavior: 'smooth' });
+              }}
+              onResumeStory={(sid) => {
+                const p = progressMap[sid];
+                openChapter(sid, p ? p.chapterIndex : 0, true, { mode: 'story' });
               }}
               onPlayChapter={(chIdx) => openChapter(selectedStory.id, chIdx, true, { mode: 'story' })}
               onAddChapters={(files) => handleAddChapters(selectedStory.id, files)}
@@ -2619,6 +2850,7 @@ export default function App() {
             <LibraryView
               stories={stories}
               progressMap={progressMap}
+              bookmarks={bookmarks}
               activeStoryId={activeStoryId}
               isOnline={isOnline}
               onOpenStory={(sid) => setSelectedStoryId(sid)}
@@ -2626,6 +2858,16 @@ export default function App() {
                 const p = progressMap[sid];
                 openChapter(sid, p ? p.chapterIndex : 0, true, { mode: 'story' });
               }}
+              onOpenBookmark={(bm, autoPlay) => {
+                openChapter(
+                  bm.storyId,
+                  bm.chapterIndex,
+                  autoPlay,
+                  { mode: 'story' },
+                  { chunkIndex: bm.chunkIndex, audioTime: bm.audioTime }
+                );
+              }}
+              onDeleteBookmark={handleDeleteBookmark}
               onCreateStory={handleCreateStory}
               onDeleteStory={handleDeleteStory}
               onDownloadStoryOffline={handleDownloadStoryOffline}
@@ -2643,7 +2885,7 @@ export default function App() {
               repeatEnabled={repeatEnabled}
               onToggleShuffle={() => setShuffleEnabled((v) => !v)}
               onToggleRepeat={() => setRepeatEnabled((v) => !v)}
-              onCreatePlaylist={(n, d) => handleCreatePlaylist(n, d)}
+              onCreatePlaylist={(n, d, items) => handleCreatePlaylist(n, d, items)}
               onDeletePlaylist={handleDeletePlaylist}
               onUpdatePlaylist={handleUpdatePlaylist}
               onPlayPlaylist={(plId, itemIdx) => {
@@ -2667,6 +2909,36 @@ export default function App() {
               }}
               onDownloadPlaylistOffline={handleDownloadPlaylistOffline}
               downloadingPlaylistId={downloadingPlaylistId}
+            />
+          ) : tab === 'stats' ? (
+            <StatsView
+              stories={stories}
+              progressMap={progressMap}
+              storedStats={listeningStats}
+              onOpenStory={(sid) => {
+                setTab('library');
+                setSelectedStoryId(sid);
+              }}
+              onResumeStory={(sid) => {
+                const p = progressMap[sid];
+                openChapter(sid, p ? p.chapterIndex : 0, true, { mode: 'story' });
+              }}
+              onGoToLibrary={() => {
+                setTab('library');
+                setSelectedStoryId(null);
+              }}
+              onResetLocalStats={() => {
+                setConfirmState({
+                  message:
+                    'Xóa nhật ký giờ nghe chi tiết theo ngày trên máy này? Dữ liệu tiến trình từng truyện (progressMap) vẫn được giữ nguyên.',
+                  confirmLabel: 'Đặt lại nhật ký',
+                  onConfirm: () => {
+                    const cleared = clearStoredListeningStats();
+                    setListeningStats(cleared);
+                    toast('Đã đặt lại nhật ký thời gian nghe trên thiết bị');
+                  },
+                });
+              }}
             />
           ) : tab === 'offline' ? (
             <OfflineManagerView
@@ -2705,8 +2977,11 @@ export default function App() {
               lastSyncedAt={lastSyncedAt}
               pendingSyncCount={pendingSyncCount}
               theme={theme}
+              nightSchedule={nightSchedule}
+              nightScheduleActive={nightScheduleActive}
               deviceName={deviceName}
               onChangeTheme={setTheme}
+              onChangeNightSchedule={handleChangeNightSchedule}
               onChangeDeviceName={(name) => {
                 setDeviceName(name);
                 try {
@@ -2877,8 +3152,8 @@ export default function App() {
       {/* Mobile Fixed Bottom Navigation Bar (hidden while full reader player dock is active) */}
       {!(isReaderOpen && activeStory && activeChapterContent) && (
         <nav className="md:hidden fixed bottom-0 left-0 right-0 z-30 pb-safe border-t border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-[#161920]/95 backdrop-blur-md">
-          <div className="h-16 grid grid-cols-4 items-center">
-            {navItems.map(({ id, label, Icon }) => {
+          <div className="h-16 grid grid-cols-5 items-center">
+            {navItems.map(({ id, label, mobileLabel, Icon }) => {
               const active = tab === id && !isReaderOpen;
               return (
                 <button
@@ -2888,15 +3163,15 @@ export default function App() {
                     setIsReaderOpen(false);
                     if (id !== 'library') setSelectedStoryId(null);
                   }}
-                  className={`min-h-[48px] flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
+                  className={`min-h-[48px] px-1 flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
                     active
                       ? 'text-blue-600 dark:text-blue-400'
                       : 'text-slate-500 dark:text-slate-400'
                   }`}
                 >
                   <Icon className="w-5 h-5" />
-                  <span className="text-[10px] font-medium tracking-tight truncate max-w-[76px]">
-                    {label}
+                  <span className="text-[10px] font-medium tracking-tight truncate max-w-[66px]">
+                    {mobileLabel || label}
                   </span>
                 </button>
               );

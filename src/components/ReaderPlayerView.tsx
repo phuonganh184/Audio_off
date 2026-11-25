@@ -2,11 +2,14 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft,
   AudioLines,
+  Bookmark,
+  BookmarkCheck,
   ChevronDown,
   ChevronUp,
   Download,
   Eye,
   Gauge,
+  Keyboard,
   Lock,
   Minus,
   Pause,
@@ -21,9 +24,12 @@ import {
   Sparkles,
   Sun,
   Timer,
+  Trash2,
   Volume2,
   Waves,
+  X,
 } from 'lucide-react';
+import { NightScheduleCard } from '@/src/components/NightScheduleCard';
 import { StoryCover } from '@/src/components/StoryCover';
 import type { EqGains } from '@/src/lib/audioEqualizer';
 import {
@@ -34,8 +40,10 @@ import {
   type AdvancedAudioFilterState,
   type AmbientMode,
   type AudioFilterPresetId,
+  type ChapterBookmark,
   type ChapterContent,
   type EqPresetId,
+  type NightScheduleConfig,
   type Story,
   type TextChunk,
   type VoiceProfileId,
@@ -74,6 +82,8 @@ interface Props {
   wakeLockEnabled: boolean;
   autoPlayNext: boolean;
   blueLightFilter: boolean;
+  nightSchedule: NightScheduleConfig;
+  nightScheduleActive: boolean;
   playlistLabel?: string;
   onBack: () => void;
   onTogglePlay: () => void;
@@ -99,6 +109,10 @@ interface Props {
   onToggleWakeLock: () => void;
   onToggleAutoPlayNext: () => void;
   onToggleBlueLightFilter: () => void;
+  onChangeNightSchedule: (config: NightScheduleConfig) => void;
+  chapterBookmarks: ChapterBookmark[];
+  onAddBookmark: (excerpt: string, note?: string) => Promise<void> | void;
+  onDeleteBookmark: (bookmarkId: string) => Promise<void> | void;
 }
 
 const SPEED_PRESETS = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.25, 2.5];
@@ -153,6 +167,8 @@ export const ReaderPlayerView: React.FC<Props> = ({
   wakeLockEnabled,
   autoPlayNext,
   blueLightFilter,
+  nightSchedule,
+  nightScheduleActive,
   playlistLabel,
   onBack,
   onTogglePlay,
@@ -178,9 +194,16 @@ export const ReaderPlayerView: React.FC<Props> = ({
   onToggleWakeLock,
   onToggleAutoPlayNext,
   onToggleBlueLightFilter,
+  onChangeNightSchedule,
+  chapterBookmarks,
+  onAddBookmark,
+  onDeleteBookmark,
 }) => {
   const [fontSize, setFontSize] = useState<'sm' | 'md' | 'lg'>('md');
   const [drawerTab, setDrawerTab] = useState<'none' | 'settings' | 'eq' | 'filter'>('none');
+  const [showBookmarkModal, setShowBookmarkModal] = useState(false);
+  const [bookmarkNote, setBookmarkNote] = useState('');
+  const [savingBookmark, setSavingBookmark] = useState(false);
   const [handsFreeMode, setHandsFreeMode] = useState<boolean>(() => {
     try {
       return localStorage.getItem('truyen_audio_hands_free') === 'true';
@@ -202,6 +225,47 @@ export const ReaderPlayerView: React.FC<Props> = ({
   const activeSpanRef = useRef<HTMLSpanElement | null>(null);
   const proseCardRef = useRef<HTMLDivElement | null>(null);
   const manualScrollPauseUntilRef = useRef<number>(0);
+  const scrolledChapterIdRef = useRef<string | null>(null);
+
+  const currentExcerpt = useMemo(() => {
+    if (isNativeAudio || chunks.length === 0) {
+      return `Đoạn âm thanh tại ${formatTime(audioCurrentTime)}`;
+    }
+    const safeIdx = Math.min(Math.max(0, chunkIndex), chunks.length - 1);
+    let combined = (chunks[safeIdx]?.t || '').trim();
+    if (combined.length < 80 && safeIdx + 1 < chunks.length) {
+      combined = `${combined} ${(chunks[safeIdx + 1]?.t || '').trim()}`.trim();
+    }
+    if (combined.length > 180) {
+      return `${combined.slice(0, 177).trim()}…`;
+    }
+    return combined || chapter.title;
+  }, [audioCurrentTime, chapter.title, chunkIndex, chunks, isNativeAudio]);
+
+  const bookmarkedChunkSet = useMemo(
+    () => new Set(chapterBookmarks.map((b) => b.chunkIndex)),
+    [chapterBookmarks]
+  );
+
+  const isCurrentPositionBookmarked = useMemo(() => {
+    if (isNativeAudio) {
+      return chapterBookmarks.some((b) => Math.abs(b.audioTime - audioCurrentTime) <= 5);
+    }
+    return bookmarkedChunkSet.has(chunkIndex);
+  }, [audioCurrentTime, bookmarkedChunkSet, chapterBookmarks, chunkIndex, isNativeAudio]);
+
+  const handleSaveCurrentBookmark = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (savingBookmark) return;
+    setSavingBookmark(true);
+    try {
+      await onAddBookmark(currentExcerpt, bookmarkNote);
+      setBookmarkNote('');
+      setShowBookmarkModal(false);
+    } finally {
+      setSavingBookmark(false);
+    }
+  };
 
   const toggleHandsFreeMode = () => {
     setHandsFreeMode((prev) => {
@@ -250,12 +314,22 @@ export const ReaderPlayerView: React.FC<Props> = ({
     };
   }, [chapter.id, fontSize, chunks.length]);
 
-  // Keep active TTS chunk visible when playing TTS (respecting manual browsing when handsFreeMode is off)
+  // Keep active TTS chunk visible when playing TTS or when opening a chapter at a saved/bookmarked offset
   useEffect(() => {
     if (!isNativeAudio && isPlaying && activeSpanRef.current) {
       activeSpanRef.current.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      scrolledChapterIdRef.current = chapter.id;
+      return;
     }
-  }, [chunkIndex, chapter.id, isNativeAudio, isPlaying]);
+    if (!isNativeAudio && chunkIndex > 0 && scrolledChapterIdRef.current !== chapter.id) {
+      scrolledChapterIdRef.current = chapter.id;
+      window.requestAnimationFrame(() => {
+        activeSpanRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      });
+    } else if (scrolledChapterIdRef.current !== chapter.id) {
+      scrolledChapterIdRef.current = chapter.id;
+    }
+  }, [chapter.id, chunkIndex, isNativeAudio, isPlaying]);
 
   // Continuous hands-free auto-scroll loop (works alongside native MP3/M4A audio or silent reading)
   useEffect(() => {
@@ -338,6 +412,106 @@ export const ReaderPlayerView: React.FC<Props> = ({
     onChangeRate(next);
   };
 
+  const [shortcutHud, setShortcutHud] = useState<string | null>(null);
+  const shortcutHudTimerRef = useRef<number | null>(null);
+  const shortcutActionRef = useRef({
+    rate,
+    isPlaying,
+    onTogglePlay,
+    onPrevChapter,
+    onNextChapter,
+    onChangeRate,
+  });
+  shortcutActionRef.current = {
+    rate,
+    isPlaying,
+    onTogglePlay,
+    onPrevChapter,
+    onNextChapter,
+    onChangeRate,
+  };
+
+  useEffect(() => {
+    const triggerHud = (message: string) => {
+      setShortcutHud(message);
+      if (shortcutHudTimerRef.current) {
+        window.clearTimeout(shortcutHudTimerRef.current);
+      }
+      shortcutHudTimerRef.current = window.setTimeout(() => {
+        setShortcutHud(null);
+        shortcutHudTimerRef.current = null;
+      }, 1400);
+    };
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (
+        tag === 'INPUT' ||
+        tag === 'TEXTAREA' ||
+        tag === 'SELECT' ||
+        target?.isContentEditable
+      ) {
+        return;
+      }
+
+      if (e.code === 'Space' || e.key === ' ') {
+        if (e.repeat) return;
+        e.preventDefault();
+        const nextPlaying = !shortcutActionRef.current.isPlaying;
+        shortcutActionRef.current.onTogglePlay();
+        triggerHud(nextPlaying ? 'Phát (Space)' : 'Tạm dừng (Space)');
+        return;
+      }
+
+      if (e.key === 'ArrowLeft') {
+        if (e.repeat) return;
+        e.preventDefault();
+        shortcutActionRef.current.onPrevChapter();
+        triggerHud('Chương trước (←)');
+        return;
+      }
+
+      if (e.key === 'ArrowRight') {
+        if (e.repeat) return;
+        e.preventDefault();
+        shortcutActionRef.current.onNextChapter();
+        triggerHud('Chương tiếp theo (→)');
+        return;
+      }
+
+      if (e.key === '+' || e.key === '=' || e.code === 'NumpadAdd') {
+        e.preventDefault();
+        const next = Math.min(
+          2.5,
+          Math.max(0.5, Math.round((shortcutActionRef.current.rate + 0.05) * 100) / 100)
+        );
+        shortcutActionRef.current.onChangeRate(next);
+        triggerHud(`Tốc độ ${formatRateLabel(next)}× (+)`);
+        return;
+      }
+
+      if (e.key === '-' || e.key === '_' || e.code === 'NumpadSubtract') {
+        e.preventDefault();
+        const next = Math.min(
+          2.5,
+          Math.max(0.5, Math.round((shortcutActionRef.current.rate - 0.05) * 100) / 100)
+        );
+        shortcutActionRef.current.onChangeRate(next);
+        triggerHud(`Tốc độ ${formatRateLabel(next)}× (-)`);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      if (shortcutHudTimerRef.current) {
+        window.clearTimeout(shortcutHudTimerRef.current);
+      }
+    };
+  }, []);
+
   return (
     <div className="space-y-4 pb-[calc(11rem+env(safe-area-inset-bottom,0px))] md:pb-44">
       {/* Top Navigation & Quick Font Size */}
@@ -365,6 +539,27 @@ export const ReaderPlayerView: React.FC<Props> = ({
             <ScrollText className="w-3.5 h-3.5 shrink-0" />
             <span className="hidden sm:inline">Đọc rảnh tay</span>
             <span className="sm:hidden">Rảnh tay</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setShowBookmarkModal(true)}
+            aria-pressed={isCurrentPositionBookmarked}
+            title="Lưu Bookmark đoạn tâm đắc hoặc xem Bookmark chương này"
+            className={`min-h-[38px] px-2.5 sm:px-3 rounded-xl border text-xs font-semibold inline-flex items-center gap-1.5 transition cursor-pointer ${
+              isCurrentPositionBookmarked || chapterBookmarks.length > 0
+                ? 'bg-amber-500/18 border-amber-500/60 text-amber-800 dark:text-amber-300'
+                : 'bg-white dark:bg-[#1a1d24] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+            }`}
+          >
+            {isCurrentPositionBookmarked ? (
+              <BookmarkCheck className="w-3.5 h-3.5 shrink-0" />
+            ) : (
+              <Bookmark className="w-3.5 h-3.5 shrink-0" />
+            )}
+            <span>
+              Bookmark{chapterBookmarks.length > 0 ? ` (${chapterBookmarks.length})` : ''}
+            </span>
           </button>
 
           <button
@@ -505,6 +700,7 @@ export const ReaderPlayerView: React.FC<Props> = ({
             <p key={para.pIdx} className="mb-5 last:mb-0">
               {para.items.map((item) => {
                 const active = !isNativeAudio && item.idx === chunkIndex;
+                const isBookmarked = !isNativeAudio && bookmarkedChunkSet.has(item.idx);
                 return (
                   <span
                     key={item.idx}
@@ -512,12 +708,15 @@ export const ReaderPlayerView: React.FC<Props> = ({
                     onClick={() => {
                       if (!isNativeAudio) onSeekChunk(item.idx);
                     }}
+                    title={isBookmarked ? 'Đoạn đã lưu Bookmark' : undefined}
                     className={`rounded px-0.5 transition-colors scroll-mb-52 ${
                       !isNativeAudio ? 'cursor-pointer hover:bg-blue-500/10' : ''
                     } ${
                       active
                         ? 'bg-blue-500/20 dark:bg-blue-500/30 text-slate-950 dark:text-white'
-                        : ''
+                        : isBookmarked
+                          ? 'bg-amber-400/15 dark:bg-amber-500/15 underline decoration-amber-500/70 decoration-2 underline-offset-4'
+                          : ''
                     }`}
                   >
                     {item.text}{' '}
@@ -528,6 +727,17 @@ export const ReaderPlayerView: React.FC<Props> = ({
           ))}
         </div>
       </div>
+
+      {/* Transient Keyboard Shortcut HUD */}
+      {shortcutHud && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="fixed bottom-[calc(8.5rem+env(safe-area-inset-bottom,0px))] left-1/2 md:left-[calc(50%+8rem)] -translate-x-1/2 z-40 pointer-events-none px-3.5 py-1.5 rounded-xl bg-slate-900/90 dark:bg-slate-100/95 text-white dark:text-slate-900 text-xs font-semibold shadow-lg backdrop-blur-sm whitespace-nowrap"
+        >
+          {shortcutHud}
+        </div>
+      )}
 
       {/* Fixed Bottom Dock: Progress Bar, Transport Controls & Settings */}
       <div
@@ -1144,6 +1354,13 @@ export const ReaderPlayerView: React.FC<Props> = ({
                 </button>
               </div>
 
+              <NightScheduleCard
+                schedule={nightSchedule}
+                isActiveNow={nightScheduleActive}
+                onChange={onChangeNightSchedule}
+                variant="drawer"
+              />
+
               <div className="sm:col-span-2 flex items-center justify-between gap-3 rounded-xl bg-slate-50 dark:bg-[#111318] border border-slate-200 dark:border-slate-800 px-3.5 py-2.5">
                 <div className="flex items-center gap-2 text-slate-700 dark:text-slate-300">
                   <Sun className="w-4 h-4 text-amber-500 shrink-0" />
@@ -1162,6 +1379,39 @@ export const ReaderPlayerView: React.FC<Props> = ({
                 >
                   {wakeLockEnabled ? 'Đang bật' : 'Tắt'}
                 </button>
+              </div>
+
+              <div className="sm:col-span-2 rounded-xl bg-slate-50 dark:bg-[#111318] border border-slate-200 dark:border-slate-800 px-3.5 py-2.5 space-y-1.5">
+                <div className="flex items-center gap-1.5 font-semibold text-slate-700 dark:text-slate-300">
+                  <Keyboard className="w-3.5 h-3.5 text-blue-500 shrink-0" />
+                  <span>Phím tắt bàn phím</span>
+                </div>
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[11px] text-slate-600 dark:text-slate-400">
+                  <span className="inline-flex items-center gap-1.5">
+                    <kbd className="px-1.5 py-0.5 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#1a1d24] font-mono text-[10px] font-semibold text-slate-800 dark:text-slate-200">
+                      Space
+                    </kbd>
+                    <span>Phát / Tạm dừng</span>
+                  </span>
+                  <span className="inline-flex items-center gap-1.5">
+                    <kbd className="px-1.5 py-0.5 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#1a1d24] font-mono text-[10px] font-semibold text-slate-800 dark:text-slate-200">
+                      ←
+                    </kbd>
+                    <kbd className="px-1.5 py-0.5 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#1a1d24] font-mono text-[10px] font-semibold text-slate-800 dark:text-slate-200">
+                      →
+                    </kbd>
+                    <span>Chương trước / sau</span>
+                  </span>
+                  <span className="inline-flex items-center gap-1.5">
+                    <kbd className="px-1.5 py-0.5 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#1a1d24] font-mono text-[10px] font-semibold text-slate-800 dark:text-slate-200">
+                      +
+                    </kbd>
+                    <kbd className="px-1.5 py-0.5 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#1a1d24] font-mono text-[10px] font-semibold text-slate-800 dark:text-slate-200">
+                      -
+                    </kbd>
+                    <span>Tăng / giảm tốc độ</span>
+                  </span>
+                </div>
               </div>
             </div>
           )}
@@ -1223,7 +1473,7 @@ export const ReaderPlayerView: React.FC<Props> = ({
             <div className="flex items-center justify-center gap-1 sm:gap-3">
               <button
                 onClick={onPrevChapter}
-                title="Chương trước"
+                title="Chương trước (←)"
                 className="min-h-[42px] min-w-[42px] flex items-center justify-center rounded-full text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
               >
                 <SkipBack className="w-5 h-5" />
@@ -1243,6 +1493,7 @@ export const ReaderPlayerView: React.FC<Props> = ({
 
               <button
                 onClick={onTogglePlay}
+                title={isPlaying ? 'Tạm dừng (Space)' : 'Phát (Space)'}
                 aria-label={isPlaying ? 'Tạm dừng' : 'Phát'}
                 className="w-12 h-12 rounded-full bg-blue-600 text-white flex items-center justify-center shadow-md hover:bg-blue-700 active:scale-95 transition cursor-pointer shrink-0"
               >
@@ -1267,7 +1518,7 @@ export const ReaderPlayerView: React.FC<Props> = ({
 
               <button
                 onClick={onNextChapter}
-                title="Chương sau"
+                title="Chương sau (→)"
                 className="min-h-[42px] min-w-[42px] flex items-center justify-center rounded-full text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
               >
                 <SkipForward className="w-5 h-5" />
@@ -1337,6 +1588,123 @@ export const ReaderPlayerView: React.FC<Props> = ({
           </div>
         </div>
       </div>
+
+      {/* Chapter Bookmark Modal */}
+      {showBookmarkModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+          onClick={() => setShowBookmarkModal(false)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-lg rounded-2xl bg-white dark:bg-[#1a1d24] border border-slate-200 dark:border-slate-800 p-5 shadow-xl space-y-4 max-h-[85vh] flex flex-col"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <Bookmark className="w-4 h-4 text-amber-500 shrink-0" />
+                <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100 truncate">
+                  Bookmark đoạn tâm đắc
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowBookmarkModal(false)}
+                aria-label="Đóng hộp thoại bookmark"
+                className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveCurrentBookmark} className="space-y-3">
+              <div className="rounded-xl bg-slate-50 dark:bg-[#111318] border border-slate-200 dark:border-slate-800 p-3 space-y-1">
+                <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400 tabular-nums">
+                  {chapter.title} ·{' '}
+                  {isNativeAudio
+                    ? formatTime(audioCurrentTime)
+                    : `Đoạn ${Math.min(chunkIndex + 1, Math.max(1, chunks.length))}/${Math.max(1, chunks.length)}`}
+                </div>
+                <p className="text-xs sm:text-sm text-slate-800 dark:text-slate-200 leading-relaxed line-clamp-3">
+                  “{currentExcerpt}”
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">
+                  Ghi chú ngắn (không bắt buộc)
+                </label>
+                <input
+                  type="text"
+                  maxLength={120}
+                  value={bookmarkNote}
+                  onChange={(e) => setBookmarkNote(e.target.value)}
+                  placeholder="Ví dụ: Câu thoại ấn tượng, cảnh cao trào…"
+                  className="w-full min-h-[42px] px-3.5 rounded-xl bg-slate-50 dark:bg-[#111318] border border-slate-200 dark:border-slate-800 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500/40"
+                />
+              </div>
+
+              <button
+                type="submit"
+                disabled={savingBookmark}
+                className="w-full min-h-[44px] rounded-xl bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700 disabled:opacity-50 inline-flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <BookmarkCheck className="w-4 h-4" />
+                <span>{savingBookmark ? 'Đang lưu…' : 'Lưu Bookmark vị trí này'}</span>
+              </button>
+            </form>
+
+            {chapterBookmarks.length > 0 && (
+              <div className="pt-3 border-t border-slate-200 dark:border-slate-800 flex-1 min-h-0 flex flex-col space-y-2">
+                <div className="text-xs font-semibold text-slate-700 dark:text-slate-300 tabular-nums">
+                  Đã lưu trong chương này ({chapterBookmarks.length})
+                </div>
+                <ul className="overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800/80 pr-1">
+                  {chapterBookmarks.map((bm) => (
+                    <li key={bm.id} className="py-2.5 flex items-start justify-between gap-2.5">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowBookmarkModal(false);
+                          if (isNativeAudio) {
+                            onSeekAudioTime(bm.audioTime);
+                          } else {
+                            onSeekChunk(bm.chunkIndex);
+                            window.requestAnimationFrame(() => {
+                              activeSpanRef.current?.scrollIntoView({
+                                block: 'center',
+                                behavior: 'smooth',
+                              });
+                            });
+                          }
+                        }}
+                        className="min-w-0 flex-1 text-left hover:text-blue-600 dark:hover:text-blue-400 cursor-pointer"
+                      >
+                        <div className="text-[11px] font-medium text-amber-600 dark:text-amber-400 tabular-nums">
+                          {isNativeAudio
+                            ? formatTime(bm.audioTime)
+                            : `Đoạn ${bm.chunkIndex + 1}`}
+                          {bm.note ? ` · ${bm.note}` : ''}
+                        </div>
+                        <p className="text-xs text-slate-700 dark:text-slate-300 line-clamp-2 mt-0.5">
+                          “{bm.excerpt}”
+                        </p>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onDeleteBookmark(bm.id)}
+                        aria-label="Xóa bookmark này"
+                        className="min-h-[38px] min-w-[38px] flex items-center justify-center rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-500/10 shrink-0 cursor-pointer"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 };

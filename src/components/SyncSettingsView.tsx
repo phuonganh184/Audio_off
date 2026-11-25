@@ -16,9 +16,10 @@ import {
   Sun,
   Upload,
 } from 'lucide-react';
+import { NightScheduleCard } from '@/src/components/NightScheduleCard';
 import { PWAInstallButton } from '@/src/components/PWAInstallButton';
 import { usePWAInstall } from '@/src/hooks/usePWAInstall';
-import type { ThemeMode } from '@/src/types';
+import type { NightScheduleConfig, ThemeMode } from '@/src/types';
 
 interface Props {
   user: User | null;
@@ -29,8 +30,11 @@ interface Props {
   lastSyncedAt: number | null;
   pendingSyncCount: number;
   theme: ThemeMode;
+  nightSchedule: NightScheduleConfig;
+  nightScheduleActive: boolean;
   deviceName: string;
   onChangeTheme: (mode: ThemeMode) => void;
+  onChangeNightSchedule: (config: NightScheduleConfig) => void;
   onChangeDeviceName: (name: string) => void;
   onSignInGoogle: () => Promise<void>;
   onSignInEmail: (email: string, password: string) => Promise<void>;
@@ -53,8 +57,11 @@ export const SyncSettingsView: React.FC<Props> = ({
   lastSyncedAt,
   pendingSyncCount,
   theme,
+  nightSchedule,
+  nightScheduleActive,
   deviceName,
   onChangeTheme,
+  onChangeNightSchedule,
   onChangeDeviceName,
   onSignInGoogle,
   onSignInEmail,
@@ -402,6 +409,13 @@ export const SyncSettingsView: React.FC<Props> = ({
             </button>
           ))}
         </div>
+
+        <NightScheduleCard
+          schedule={nightSchedule}
+          isActiveNow={nightScheduleActive}
+          onChange={onChangeNightSchedule}
+          variant="inline"
+        />
       </div>
 
       {/* Device Name & PWA Install */}

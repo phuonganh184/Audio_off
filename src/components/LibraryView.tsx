@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import {
   BookOpen,
+  Bookmark,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
@@ -18,13 +19,19 @@ import {
 } from 'lucide-react';
 import { StoryCover } from '@/src/components/StoryCover';
 import { formatBytes } from '@/src/lib/localDb';
-import { STORY_GENRES, type ListeningProgress, type Story } from '@/src/types';
+import {
+  STORY_GENRES,
+  type ChapterBookmark,
+  type ListeningProgress,
+  type Story,
+} from '@/src/types';
 
 type FilterMode = 'all' | 'offline' | 'in_progress';
 type HistoryScope = 'all' | 'in_progress';
 
 const HISTORY_COLLAPSED_KEY = 'truyen_audio_history_collapsed_v1';
 const HIDDEN_HISTORY_KEY = 'truyen_audio_hidden_history_v1';
+const BOOKMARKS_COLLAPSED_KEY = 'truyen_audio_bookmarks_collapsed_v1';
 
 function computeStoryProgress(story: Story, prog?: ListeningProgress): {
   percent: number;
@@ -77,10 +84,13 @@ function formatRelativeTime(timestamp: number): string {
 interface Props {
   stories: Story[];
   progressMap: Record<string, ListeningProgress>;
+  bookmarks: ChapterBookmark[];
   activeStoryId?: string | null;
   isOnline: boolean;
   onOpenStory: (storyId: string) => void;
   onResumeStory: (storyId: string) => void;
+  onOpenBookmark: (bookmark: ChapterBookmark, autoPlay: boolean) => void;
+  onDeleteBookmark: (bookmarkId: string) => void;
   onCreateStory: (title: string, author: string, genre: string, coverFile?: File) => Promise<void>;
   onDeleteStory: (storyId: string) => void;
   onDownloadStoryOffline: (storyId: string) => Promise<void>;
@@ -93,10 +103,13 @@ const CUSTOM_GENRE_VALUE = '__custom__';
 export const LibraryView: React.FC<Props> = ({
   stories,
   progressMap,
+  bookmarks,
   activeStoryId,
   isOnline,
   onOpenStory,
   onResumeStory,
+  onOpenBookmark,
+  onDeleteBookmark,
   onCreateStory,
   onDeleteStory,
   onDownloadStoryOffline,
@@ -115,6 +128,15 @@ export const LibraryView: React.FC<Props> = ({
       return false;
     }
   });
+  const [bookmarksCollapsed, setBookmarksCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(BOOKMARKS_COLLAPSED_KEY) === '1';
+    } catch {
+      return false;
+    }
+  });
+  const [bookmarksExpanded, setBookmarksExpanded] = useState(false);
+  const [bookmarkStoryFilter, setBookmarkStoryFilter] = useState<string>('all');
   const [hiddenHistoryMap, setHiddenHistoryMap] = useState<Record<string, number>>(() => {
     try {
       const raw = localStorage.getItem(HIDDEN_HISTORY_KEY);
@@ -144,6 +166,38 @@ export const LibraryView: React.FC<Props> = ({
       return next;
     });
   };
+
+  const toggleBookmarksCollapsed = () => {
+    setBookmarksCollapsed((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem(BOOKMARKS_COLLAPSED_KEY, next ? '1' : '0');
+      } catch {
+        // ignore storage errors
+      }
+      return next;
+    });
+  };
+
+  const bookmarkStories = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const bm of bookmarks) {
+      if (!map.has(bm.storyId)) {
+        map.set(bm.storyId, bm.storyTitle);
+      }
+    }
+    return Array.from(map.entries()).map(([id, title]) => ({ id, title }));
+  }, [bookmarks]);
+
+  const filteredBookmarks = useMemo(() => {
+    if (bookmarkStoryFilter === 'all') return bookmarks;
+    return bookmarks.filter((b) => b.storyId === bookmarkStoryFilter);
+  }, [bookmarkStoryFilter, bookmarks]);
+
+  const visibleBookmarks = useMemo(
+    () => (bookmarksExpanded ? filteredBookmarks : filteredBookmarks.slice(0, 4)),
+    [bookmarksExpanded, filteredBookmarks]
+  );
 
   const handleDismissHistoryItem = (storyId: string, updatedAt: number) => {
     setHiddenHistoryMap((prev) => {
@@ -601,6 +655,171 @@ export const LibraryView: React.FC<Props> = ({
                           Khôi phục {hiddenHistoryCount} mục đã ẩn
                         </button>
                       )}
+                    </div>
+                  )}
+                </>
+              )}
+            </>
+          )}
+        </section>
+      )}
+
+      {/* Bookmarks Section */}
+      {(bookmarks.length > 0 || stories.length > 0) && (
+        <section
+          aria-label="Bookmark đã lưu"
+          className="rounded-2xl bg-white dark:bg-[#1a1d24] border border-slate-200 dark:border-slate-800 overflow-hidden"
+        >
+          <div className="px-4 py-3.5 border-b border-slate-100 dark:border-slate-800/80 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <Bookmark className="w-4 h-4 text-amber-500 shrink-0" />
+              <div className="min-w-0">
+                <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100 leading-tight">
+                  Bookmark đã lưu
+                </h3>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5 tabular-nums">
+                  {bookmarks.length === 0
+                    ? 'Chưa có đoạn tâm đắc nào được đánh dấu'
+                    : `${bookmarks.length} đoạn tâm đắc đã lưu`}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
+              {bookmarkStories.length > 1 && !bookmarksCollapsed && (
+                <select
+                  aria-label="Lọc bookmark theo truyện"
+                  value={bookmarkStoryFilter}
+                  onChange={(e) => setBookmarkStoryFilter(e.target.value)}
+                  className="min-h-[38px] max-w-[180px] px-2.5 rounded-xl bg-slate-100 dark:bg-[#111318] border border-slate-200 dark:border-slate-800 text-xs font-medium text-slate-700 dark:text-slate-200 truncate cursor-pointer"
+                >
+                  <option value="all">Tất cả truyện ({bookmarks.length})</option>
+                  {bookmarkStories.map((st) => (
+                    <option key={st.id} value={st.id}>
+                      {st.title}
+                    </option>
+                  ))}
+                </select>
+              )}
+
+              <button
+                type="button"
+                onClick={toggleBookmarksCollapsed}
+                aria-expanded={!bookmarksCollapsed}
+                aria-label={bookmarksCollapsed ? 'Mở rộng bookmark' : 'Thu gọn bookmark'}
+                className="min-h-[44px] px-3 rounded-xl border border-slate-200 dark:border-slate-800 text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800/70 inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <span>{bookmarksCollapsed ? 'Mở rộng' : 'Thu gọn'}</span>
+                {bookmarksCollapsed ? (
+                  <ChevronDown className="w-4 h-4" />
+                ) : (
+                  <ChevronUp className="w-4 h-4" />
+                )}
+              </button>
+            </div>
+          </div>
+
+          {!bookmarksCollapsed && (
+            <>
+              {bookmarks.length === 0 ? (
+                <div className="px-4 py-4 text-center">
+                  <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400">
+                    Khi nghe hoặc đọc truyện, bấm nút <strong>Bookmark</strong> ở góc trên trình đọc để lưu lại những đoạn tâm đắc và quay lại nhanh tại đây.
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <ul className="divide-y divide-slate-100 dark:divide-slate-800/80">
+                    {visibleBookmarks.map((bm) => (
+                      <li
+                        key={bm.id}
+                        className="px-4 py-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:bg-slate-50/80 dark:hover:bg-slate-800/30 transition-colors"
+                      >
+                        <div
+                          onClick={() => onOpenBookmark(bm, false)}
+                          className="min-w-0 flex-1 cursor-pointer space-y-1"
+                        >
+                          <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs tabular-nums">
+                            <span className="font-semibold text-slate-900 dark:text-slate-100 truncate max-w-[220px]">
+                              {bm.storyTitle}
+                            </span>
+                            <span aria-hidden="true" className="text-slate-400">
+                              ·
+                            </span>
+                            <span className="font-medium text-amber-600 dark:text-amber-400 truncate max-w-[220px]">
+                              Ch. {bm.chapterIndex + 1}: {bm.chapterTitle}
+                            </span>
+                            <span aria-hidden="true" className="text-slate-400">
+                              ·
+                            </span>
+                            <span className="text-slate-500 dark:text-slate-400">
+                              {formatRelativeTime(bm.createdAt)}
+                            </span>
+                          </div>
+
+                          <p className="text-xs sm:text-sm text-slate-700 dark:text-slate-300 line-clamp-2 leading-relaxed">
+                            “{bm.excerpt}”
+                          </p>
+
+                          {bm.note && (
+                            <p className="text-xs text-blue-600 dark:text-blue-400 font-medium truncate">
+                              Ghi chú: {bm.note}
+                            </p>
+                          )}
+                        </div>
+
+                        <div className="flex items-center justify-end gap-1.5 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => onOpenBookmark(bm, true)}
+                            className="min-h-[44px] px-3.5 rounded-xl bg-blue-600 text-white hover:bg-blue-700 active:scale-[0.98] text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition whitespace-nowrap shrink-0 cursor-pointer"
+                          >
+                            <Play className="w-3.5 h-3.5" />
+                            <span>Nghe từ đây</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onOpenBookmark(bm, false)}
+                            title="Mở chương tại đoạn đã lưu"
+                            aria-label={`Đọc đoạn đã lưu trong ${bm.storyTitle}`}
+                            className="min-h-[44px] px-3 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+                          >
+                            <BookOpen className="w-3.5 h-3.5" />
+                            <span>Đọc</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onDeleteBookmark(bm.id)}
+                            title="Xóa bookmark"
+                            aria-label={`Xóa bookmark trong ${bm.storyTitle}`}
+                            className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-xl text-slate-400 hover:text-red-500 hover:bg-red-500/10 transition-colors cursor-pointer"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+
+                  {filteredBookmarks.length > 4 && (
+                    <div className="px-4 py-2.5 border-t border-slate-100 dark:border-slate-800/80 bg-slate-50/50 dark:bg-[#151820]/60">
+                      <button
+                        type="button"
+                        onClick={() => setBookmarksExpanded((v) => !v)}
+                        className="min-h-[40px] px-2 text-xs font-semibold text-blue-600 dark:text-blue-400 hover:underline inline-flex items-center gap-1 cursor-pointer"
+                      >
+                        {bookmarksExpanded ? (
+                          <>
+                            <span>Thu gọn danh sách bookmark</span>
+                            <ChevronUp className="w-3.5 h-3.5" />
+                          </>
+                        ) : (
+                          <>
+                            <span>Xem tất cả {filteredBookmarks.length} bookmark</span>
+                            <ChevronDown className="w-3.5 h-3.5" />
+                          </>
+                        )}
+                      </button>
                     </div>
                   )}
                 </>

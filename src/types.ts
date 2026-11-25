@@ -2,7 +2,7 @@ export type ThemeMode = 'light' | 'dark' | 'auto';
 
 export type AmbientMode = 'silent' | 'rain' | 'brown';
 
-export type NavTab = 'library' | 'playlists' | 'offline' | 'sync';
+export type NavTab = 'library' | 'playlists' | 'stats' | 'offline' | 'sync';
 
 export type VoiceProfileId =
   | 'natural'
@@ -312,3 +312,35 @@ export interface PlaybackContext {
   playlistId?: string;
   playlistIndex?: number;
 }
+
+export interface NightScheduleConfig {
+  enabled: boolean;
+  startTime: string; // HH:MM (24h local time)
+  endTime: string; // HH:MM (24h local time)
+  enableDarkMode: boolean;
+  enableBlueLightFilter: boolean;
+}
+
+export const DEFAULT_NIGHT_SCHEDULE: NightScheduleConfig = {
+  enabled: false,
+  startTime: '22:00',
+  endTime: '06:00',
+  enableDarkMode: true,
+  enableBlueLightFilter: true,
+};
+
+export interface ChapterBookmark {
+  id: string;
+  storyId: string;
+  storyTitle: string;
+  chapterId: string;
+  chapterIndex: number;
+  chapterTitle: string;
+  chunkIndex: number;
+  audioTime: number;
+  excerpt: string;
+  note?: string;
+  createdAt: number;
+}
+
+

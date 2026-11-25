@@ -1,4 +1,5 @@
 import type {
+  ChapterBookmark,
   ChapterContent,
   ListeningProgress,
   Playlist,
@@ -7,7 +8,7 @@ import type {
 } from '@/src/types';
 
 const DB_NAME = 'truyen-audio-v2';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 const STORES = {
   STORIES: 'stories',
@@ -16,6 +17,7 @@ const STORES = {
   PROGRESS: 'progress',
   SYNC_QUEUE: 'syncQueue',
   TTS_CACHE: 'ttsCache',
+  BOOKMARKS: 'bookmarks',
 } as const;
 
 let dbPromise: Promise<IDBDatabase> | null = null;
@@ -45,6 +47,10 @@ function openLocalDB(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(STORES.TTS_CACHE)) {
         const ttsStore = db.createObjectStore(STORES.TTS_CACHE, { keyPath: 'key' });
         ttsStore.createIndex('byChapter', 'chapterId', { unique: false });
+      }
+      if (!db.objectStoreNames.contains(STORES.BOOKMARKS)) {
+        const bmStore = db.createObjectStore(STORES.BOOKMARKS, { keyPath: 'id' });
+        bmStore.createIndex('byStory', 'storyId', { unique: false });
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -90,7 +96,10 @@ export async function putStory(story: Story): Promise<void> {
 
 export async function deleteStoryLocal(storyId: string): Promise<void> {
   const db = await openLocalDB();
-  const tx = db.transaction([STORES.STORIES, STORES.CHAPTERS, STORES.PROGRESS], 'readwrite');
+  const tx = db.transaction(
+    [STORES.STORIES, STORES.CHAPTERS, STORES.PROGRESS, STORES.BOOKMARKS],
+    'readwrite'
+  );
   tx.objectStore(STORES.STORIES).delete(storyId);
   tx.objectStore(STORES.PROGRESS).delete(storyId);
 
@@ -98,6 +107,12 @@ export async function deleteStoryLocal(storyId: string): Promise<void> {
   const keys = await txRequest<IDBValidKey[]>(chIndex.getAllKeys(storyId));
   for (const key of keys) {
     tx.objectStore(STORES.CHAPTERS).delete(key);
+  }
+
+  const bmIndex = tx.objectStore(STORES.BOOKMARKS).index('byStory');
+  const bmKeys = await txRequest<IDBValidKey[]>(bmIndex.getAllKeys(storyId));
+  for (const key of bmKeys) {
+    tx.objectStore(STORES.BOOKMARKS).delete(key);
   }
   await txDone(tx);
 }
@@ -170,6 +185,27 @@ export async function deletePlaylistLocal(playlistId: string): Promise<void> {
   const db = await openLocalDB();
   const tx = db.transaction(STORES.PLAYLISTS, 'readwrite');
   tx.objectStore(STORES.PLAYLISTS).delete(playlistId);
+  await txDone(tx);
+}
+
+export async function getAllBookmarks(): Promise<ChapterBookmark[]> {
+  const db = await openLocalDB();
+  const tx = db.transaction(STORES.BOOKMARKS, 'readonly');
+  const list = await txRequest<ChapterBookmark[]>(tx.objectStore(STORES.BOOKMARKS).getAll());
+  return list.sort((a, b) => b.createdAt - a.createdAt);
+}
+
+export async function putBookmark(bookmark: ChapterBookmark): Promise<void> {
+  const db = await openLocalDB();
+  const tx = db.transaction(STORES.BOOKMARKS, 'readwrite');
+  tx.objectStore(STORES.BOOKMARKS).put(bookmark);
+  await txDone(tx);
+}
+
+export async function deleteBookmarkLocal(bookmarkId: string): Promise<void> {
+  const db = await openLocalDB();
+  const tx = db.transaction(STORES.BOOKMARKS, 'readwrite');
+  tx.objectStore(STORES.BOOKMARKS).delete(bookmarkId);
   await txDone(tx);
 }
 
@@ -287,14 +323,16 @@ export interface BackupBundle {
   chapters: Array<Omit<ChapterContent, 'audioBlob'>>;
   playlists: Playlist[];
   progress: ListeningProgress[];
+  bookmarks?: ChapterBookmark[];
 }
 
 export async function exportBackupData(): Promise<BackupBundle> {
-  const [stories, allChapters, playlists, progressMap] = await Promise.all([
+  const [stories, allChapters, playlists, progressMap, bookmarks] = await Promise.all([
     getAllStories(),
     getAllChapters(),
     getAllPlaylists(),
     getAllProgress(),
+    getAllBookmarks(),
   ]);
 
   const textChapters = allChapters
@@ -308,6 +346,7 @@ export async function exportBackupData(): Promise<BackupBundle> {
     chapters: textChapters,
     playlists,
     progress: Object.values(progressMap),
+    bookmarks,
   };
 }
 
@@ -324,6 +363,7 @@ export async function importBackupData(rawJson: string): Promise<{
   const existingStories = new Map((await getAllStories()).map((s) => [s.id, s]));
   const existingPlaylists = new Map((await getAllPlaylists()).map((p) => [p.id, p]));
   const existingProgress = await getAllProgress();
+  const existingBookmarks = new Map((await getAllBookmarks()).map((b) => [b.id, b]));
 
   let storiesImported = 0;
   let chaptersImported = 0;
@@ -374,6 +414,15 @@ export async function importBackupData(rawJson: string): Promise<{
       const prev = existingProgress[pr.storyId];
       if (!prev || pr.updatedAt > prev.updatedAt) {
         await putProgress(pr);
+      }
+    }
+  }
+
+  if (Array.isArray(parsed.bookmarks)) {
+    for (const bm of parsed.bookmarks) {
+      if (!bm?.id || !bm?.storyId || !bm?.chapterId) continue;
+      if (!existingBookmarks.has(bm.id)) {
+        await putBookmark(bm);
       }
     }
   }
