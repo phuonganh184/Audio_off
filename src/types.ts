@@ -343,4 +343,74 @@ export interface ChapterBookmark {
   createdAt: number;
 }
 
+export type ReaderBgThemeId = 'default' | 'cream' | 'mint' | 'sky' | 'lavender' | 'peach';
+
+export interface ReaderPastelTheme {
+  id: ReaderBgThemeId;
+  label: string;
+  swatchHex: string;
+  cardBgClass: string;
+  proseTextClass: string;
+  activeSentenceClass: string;
+  activeWordClass: string;
+}
+
+export const READER_PASTEL_THEMES: ReaderPastelTheme[] = [
+  {
+    id: 'default',
+    label: 'Mặc định',
+    swatchHex: '#94a3b8',
+    cardBgClass: 'bg-white dark:bg-[#1a1d24] border-slate-200 dark:border-slate-800',
+    proseTextClass: 'text-slate-800 dark:text-slate-200',
+    activeSentenceClass: 'bg-blue-500/18 dark:bg-blue-500/25 text-slate-950 dark:text-white',
+    activeWordClass: 'bg-blue-600 text-white dark:bg-blue-400 dark:text-slate-950',
+  },
+  {
+    id: 'cream',
+    label: 'Kem ấm',
+    swatchHex: '#F7EED3',
+    cardBgClass: 'bg-[#FDF6E3] border-[#EAE0C5]',
+    proseTextClass: 'text-[#3D3126]',
+    activeSentenceClass: 'bg-[#E9DCBA]/75 text-[#261D14]',
+    activeWordClass: 'bg-[#9A5B13] text-[#FFFDF7]',
+  },
+  {
+    id: 'mint',
+    label: 'Bạc hà',
+    swatchHex: '#D8F1E5',
+    cardBgClass: 'bg-[#EBF7F1] border-[#CBE7D9]',
+    proseTextClass: 'text-[#1B3A2F]',
+    activeSentenceClass: 'bg-[#C4E8D7]/80 text-[#0F261E]',
+    activeWordClass: 'bg-[#11694B] text-white',
+  },
+  {
+    id: 'sky',
+    label: 'Xanh trời',
+    swatchHex: '#DCEBFA',
+    cardBgClass: 'bg-[#EDF4FC] border-[#CFE0F5]',
+    proseTextClass: 'text-[#1D3048]',
+    activeSentenceClass: 'bg-[#C7DEF8]/85 text-[#0F1E32]',
+    activeWordClass: 'bg-[#1D5FBF] text-white',
+  },
+  {
+    id: 'lavender',
+    label: 'Oải hương',
+    swatchHex: '#E8E0F7',
+    cardBgClass: 'bg-[#F3EFFB] border-[#DDD3F2]',
+    proseTextClass: 'text-[#2F2544]',
+    activeSentenceClass: 'bg-[#DDD1F5]/85 text-[#1E1530]',
+    activeWordClass: 'bg-[#5E3DA8] text-white',
+  },
+  {
+    id: 'peach',
+    label: 'Hồng đào',
+    swatchHex: '#FCE2DA',
+    cardBgClass: 'bg-[#FDF0EC] border-[#F1D4CB]',
+    proseTextClass: 'text-[#422823]',
+    activeSentenceClass: 'bg-[#F7CFC4]/80 text-[#2B1713]',
+    activeWordClass: 'bg-[#B3432E] text-white',
+  },
+];
+
+
 

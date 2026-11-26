@@ -45,13 +45,15 @@ jobs:
           fi
           npx cap sync android
 
-      - name: Configure background audio permissions & app icons
+      - name: Configure background audio permissions, native TTS bridge & app icons
         run: |
           node -e '
             const fs = require("fs");
+            const path = require("path");
             const manifestPath = "android/app/src/main/AndroidManifest.xml";
             let xml = fs.readFileSync(manifestPath, "utf8");
             const perms = [
+              "android.permission.INTERNET",
               "android.permission.WAKE_LOCK",
               "android.permission.FOREGROUND_SERVICE",
               "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"
@@ -64,7 +66,204 @@ jobs:
                 );
               }
             }
+            if (!xml.includes("android.intent.action.TTS_SERVICE")) {
+              xml = xml.replace(
+                "</manifest>",
+                `    <queries>\n        <intent>\n            <action android:name="android.intent.action.TTS_SERVICE" />\n        </intent>\n    </queries>\n</manifest>`
+              );
+            }
             fs.writeFileSync(manifestPath, xml, "utf8");
+
+            const pkgDir = "android/app/src/main/java/com/truyenaudio/app";
+            fs.mkdirSync(pkgDir, { recursive: true });
+            const bridgeJava = `package com.truyenaudio.app;
+
+import android.content.Context;
+import android.os.Build;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.speech.tts.TextToSpeech;
+import android.speech.tts.UtteranceProgressListener;
+import android.speech.tts.Voice;
+import android.webkit.JavascriptInterface;
+import android.webkit.WebView;
+import org.json.JSONArray;
+import org.json.JSONObject;
+import java.util.Locale;
+import java.util.Set;
+
+public class NativeTtsBridge implements TextToSpeech.OnInitListener {
+    private final WebView webView;
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private TextToSpeech tts;
+    private volatile boolean ready = false;
+    private volatile int lastTextLen = 1;
+
+    public NativeTtsBridge(Context context, WebView webView) {
+        this.webView = webView;
+        this.tts = new TextToSpeech(context.getApplicationContext(), this);
+        this.tts.setOnUtteranceProgressListener(new UtteranceProgressListener() {
+            @Override
+            public void onStart(String utteranceId) {}
+
+            @Override
+            public void onDone(String utteranceId) {
+                emit(utteranceId, "done", 1.0);
+            }
+
+            @Override
+            public void onError(String utteranceId) {
+                emit(utteranceId, "error", 0.0);
+            }
+
+            @Override
+            public void onRangeStart(String utteranceId, int start, int end, int frame) {
+                if (lastTextLen > 0) {
+                    double ratio = Math.min(1.0, Math.max(0.0, (double) end / (double) lastTextLen));
+                    emit(utteranceId, "progress", ratio);
+                }
+            }
+        });
+    }
+
+    @Override
+    public void onInit(int status) {
+        if (status == TextToSpeech.SUCCESS) {
+            int res = tts.setLanguage(new Locale("vi", "VN"));
+            ready = (res != TextToSpeech.LANG_MISSING_DATA && res != TextToSpeech.LANG_NOT_SUPPORTED) || true;
+        }
+    }
+
+    private void emit(final String utteranceId, final String type, final double progress) {
+        mainHandler.post(() -> {
+            if (webView == null) return;
+            String safeId = JSONObject.quote(utteranceId == null ? "" : utteranceId);
+            String js = "window.__onAndroidTtsEvent && window.__onAndroidTtsEvent(" + safeId + ", \\"" + type + "\\", " + progress + ");";
+            webView.evaluateJavascript(js, null);
+        });
+    }
+
+    @JavascriptInterface
+    public boolean isAvailable() {
+        return tts != null;
+    }
+
+    @JavascriptInterface
+    public String getVoicesJson() {
+        JSONArray arr = new JSONArray();
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && tts != null) {
+                Set<Voice> voices = tts.getVoices();
+                if (voices != null) {
+                    for (Voice v : voices) {
+                        Locale loc = v.getLocale();
+                        String lang = loc != null ? loc.toLanguageTag() : "";
+                        if (lang.toLowerCase().startsWith("vi") || v.getName().toLowerCase().contains("viet")) {
+                            JSONObject obj = new JSONObject();
+                            obj.put("name", v.getName());
+                            obj.put("lang", lang.isEmpty() ? "vi-VN" : lang);
+                            obj.put("localService", !v.isNetworkConnectionRequired());
+                            arr.put(obj);
+                        }
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        return arr.toString();
+    }
+
+    @JavascriptInterface
+    public boolean speak(String utteranceId, String text, float rate, float pitch, String voiceName) {
+        if (tts == null || text == null || text.trim().isEmpty()) return false;
+        try {
+            lastTextLen = Math.max(1, text.length());
+            tts.setSpeechRate(Math.max(0.5f, Math.min(2.5f, rate)));
+            tts.setPitch(Math.max(0.5f, Math.min(2.0f, pitch)));
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && voiceName != null && !voiceName.isEmpty()) {
+                Set<Voice> voices = tts.getVoices();
+                if (voices != null) {
+                    for (Voice v : voices) {
+                        if (voiceName.equals(v.getName())) {
+                            tts.setVoice(v);
+                            break;
+                        }
+                    }
+                }
+            } else {
+                tts.setLanguage(new Locale("vi", "VN"));
+            }
+            Bundle params = new Bundle();
+            int res = tts.speak(text, TextToSpeech.QUEUE_FLUSH, params, utteranceId);
+            return res == TextToSpeech.SUCCESS;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    @JavascriptInterface
+    public void stop() {
+        if (tts != null) {
+            try { tts.stop(); } catch (Exception ignored) {}
+        }
+    }
+
+    public void shutdown() {
+        if (tts != null) {
+            try { tts.shutdown(); } catch (Exception ignored) {}
+        }
+    }
+}
+`;
+            fs.writeFileSync(path.join(pkgDir, "NativeTtsBridge.java"), bridgeJava, "utf8");
+
+            const mainActivityJava = `package com.truyenaudio.app;
+
+import android.os.Bundle;
+import android.webkit.WebView;
+import androidx.activity.OnBackPressedCallback;
+import com.getcapacitor.BridgeActivity;
+
+public class MainActivity extends BridgeActivity {
+    private NativeTtsBridge nativeTtsBridge;
+
+    @Override
+    public void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        if (this.bridge != null && this.bridge.getWebView() != null) {
+            nativeTtsBridge = new NativeTtsBridge(this, this.bridge.getWebView());
+            this.bridge.getWebView().addJavascriptInterface(nativeTtsBridge, "AndroidNativeTts");
+        }
+        getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+            @Override
+            public void handleOnBackPressed() {
+                WebView wv = bridge != null ? bridge.getWebView() : null;
+                if (wv != null) {
+                    wv.evaluateJavascript(
+                        "(function(){ try { return typeof window.__handleAndroidBack === 'function' ? window.__handleAndroidBack() : 'exit'; } catch(e) { return 'exit'; } })()",
+                        result -> {
+                            if ("\\\"exit\\\"".equals(result)) {
+                                finish();
+                            }
+                        }
+                    );
+                } else {
+                    finish();
+                }
+            }
+        });
+    }
+
+    @Override
+    public void onDestroy() {
+        if (nativeTtsBridge != null) {
+            nativeTtsBridge.shutdown();
+        }
+        super.onDestroy();
+    }
+}
+`;
+            fs.writeFileSync(path.join(pkgDir, "MainActivity.java"), mainActivityJava, "utf8");
           '
           for dir in android/app/src/main/res/mipmap-mdpi android/app/src/main/res/mipmap-hdpi android/app/src/main/res/mipmap-xhdpi android/app/src/main/res/mipmap-xxhdpi android/app/src/main/res/mipmap-xxxhdpi; do
             if [ -d "$dir" ]; then

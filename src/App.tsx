@@ -33,6 +33,14 @@ import { SyncSettingsView } from '@/src/components/SyncSettingsView';
 import { useOnlineStatus } from '@/src/hooks/useOnlineStatus';
 import { useTheme } from '@/src/hooks/useTheme';
 import {
+  getAndroidNativeVoices,
+  getFallbackRemoteTtsBase,
+  getInitialTtsApiBase,
+  isAndroidNativeTtsAvailable,
+  speakAndroidNativeTts,
+  stopAndroidNativeTts,
+} from '@/src/lib/androidTts';
+import {
   clearStoredListeningStats,
   loadStoredListeningStats,
   recordListeningSeconds,
@@ -206,6 +214,11 @@ export default function App() {
   const [selectedStoryId, setSelectedStoryId] = useState<string | null>(null);
   const [isReaderOpen, setIsReaderOpen] = useState(false);
 
+  const readerBackInterceptorRef = useRef<(() => boolean) | null>(null);
+  const fromBackNavRef = useRef(false);
+  const prevRouteKeyRef = useRef('library||0');
+  const lastBackExitAttemptRef = useRef(0);
+
   const [stories, setStories] = useState<Story[]>([]);
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
   const [bookmarks, setBookmarks] = useState<ChapterBookmark[]>([]);
@@ -263,6 +276,9 @@ export default function App() {
   const [repeatEnabled, setRepeatEnabled] = useState(false);
 
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
+  const [androidVoices, setAndroidVoices] = useState<
+    { name: string; lang: string; localService: boolean }[]
+  >([]);
   const [selectedVoiceName, setSelectedVoiceName] = useState<string>(() => {
     try {
       return localStorage.getItem('truyen_audio_voice') || '';
@@ -348,8 +364,12 @@ export default function App() {
   const ttsAudioRef = useRef<HTMLAudioElement | null>(null);
   const ttsAudioUrlRef = useRef<string | null>(null);
   const ttsMissingKeyWarnedRef = useRef(false);
+  const ttsApiBaseRef = useRef<string>(getInitialTtsApiBase());
+  const ttsUnlockedRef = useRef(false);
+  const speechProgressTimerRef = useRef<number | null>(null);
   const [audioCurrentTime, setAudioCurrentTime] = useState(0);
   const [audioDuration, setAudioDuration] = useState(0);
+  const [speechChunkProgress, setSpeechChunkProgress] = useState(0);
 
   // Mutable refs for stale-closure-free SpeechSynthesis & MediaSession callbacks
   const speechTokenRef = useRef(0);
@@ -510,6 +530,256 @@ export default function App() {
     };
   }, [reconcileNightSchedule]);
 
+  // Keep latest navigation & overlay state in refs for Android hardware Back & browser popstate
+  const navStateRef = useRef({
+    tab,
+    selectedStoryId,
+    isReaderOpen,
+    hasConfirm: false,
+    hasPlaylistModal: false,
+  });
+  navStateRef.current = {
+    tab,
+    selectedStoryId,
+    isReaderOpen,
+    hasConfirm: !!confirmState,
+    hasPlaylistModal: !!playlistModalTarget,
+  };
+
+  // 1) Initialize history sentinel on mobile/PWA and push navigation states cleanly
+  useEffect(() => {
+    const isMobileOrStandalone =
+      (typeof window.matchMedia === 'function' &&
+        window.matchMedia('(display-mode: standalone)').matches) ||
+      /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+
+    const currentState = window.history.state as { __truyenRoute?: boolean } | null;
+    if (!currentState?.__truyenRoute) {
+      window.history.replaceState(
+        {
+          __truyenRoute: true,
+          isRootExit: isMobileOrStandalone,
+          tab: 'library',
+          selectedStoryId: null,
+          isReaderOpen: false,
+        },
+        ''
+      );
+      if (isMobileOrStandalone) {
+        window.history.pushState(
+          {
+            __truyenRoute: true,
+            isRootGuard: true,
+            tab: 'library',
+            selectedStoryId: null,
+            isReaderOpen: false,
+          },
+          ''
+        );
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    const routeKey = `${tab}|${selectedStoryId || ''}|${isReaderOpen ? 1 : 0}`;
+    if (routeKey === prevRouteKeyRef.current) return;
+    prevRouteKeyRef.current = routeKey;
+
+    if (fromBackNavRef.current) {
+      fromBackNavRef.current = false;
+      return;
+    }
+
+    const snap = {
+      __truyenRoute: true,
+      tab,
+      selectedStoryId,
+      isReaderOpen,
+    };
+    window.history.pushState(snap, '');
+  }, [tab, selectedStoryId, isReaderOpen]);
+
+  useEffect(() => {
+    const onPopState = (ev: PopStateEvent) => {
+      const cur = navStateRef.current;
+
+      // Close open dialogs/modals/drawers before popping route
+      if (cur.hasConfirm) {
+        setConfirmState(null);
+        window.history.pushState(
+          {
+            __truyenRoute: true,
+            tab: cur.tab,
+            selectedStoryId: cur.selectedStoryId,
+            isReaderOpen: cur.isReaderOpen,
+          },
+          ''
+        );
+        return;
+      }
+      if (cur.hasPlaylistModal) {
+        setPlaylistModalTarget(null);
+        window.history.pushState(
+          {
+            __truyenRoute: true,
+            tab: cur.tab,
+            selectedStoryId: cur.selectedStoryId,
+            isReaderOpen: cur.isReaderOpen,
+          },
+          ''
+        );
+        return;
+      }
+      if (cur.isReaderOpen && readerBackInterceptorRef.current?.()) {
+        window.history.pushState(
+          {
+            __truyenRoute: true,
+            tab: cur.tab,
+            selectedStoryId: cur.selectedStoryId,
+            isReaderOpen: cur.isReaderOpen,
+          },
+          ''
+        );
+        return;
+      }
+
+      const st = ev.state as {
+        __truyenRoute?: boolean;
+        isRootExit?: boolean;
+        tab?: NavTab;
+        selectedStoryId?: string | null;
+        isReaderOpen?: boolean;
+      } | null;
+
+      if (st?.isRootExit) {
+        if (cur.isReaderOpen || cur.selectedStoryId || cur.tab !== 'library') {
+          fromBackNavRef.current = true;
+          setIsReaderOpen(false);
+          setSelectedStoryId(null);
+          setTab('library');
+          window.history.pushState(
+            {
+              __truyenRoute: true,
+              isRootGuard: true,
+              tab: 'library',
+              selectedStoryId: null,
+              isReaderOpen: false,
+            },
+            ''
+          );
+          return;
+        }
+        const now = Date.now();
+        if (now - lastBackExitAttemptRef.current < 2200) {
+          window.history.back();
+          return;
+        }
+        lastBackExitAttemptRef.current = now;
+        toast('Nhấn Quay lại lần nữa để thoát ứng dụng');
+        window.history.pushState(
+          {
+            __truyenRoute: true,
+            isRootGuard: true,
+            tab: 'library',
+            selectedStoryId: null,
+            isReaderOpen: false,
+          },
+          ''
+        );
+        return;
+      }
+
+      if (st?.__truyenRoute) {
+        fromBackNavRef.current = true;
+        setTab(st.tab || 'library');
+        setSelectedStoryId(st.selectedStoryId || null);
+        setIsReaderOpen(!!st.isReaderOpen);
+        return;
+      }
+
+      // Fallback when browser pops to a state without metadata
+      if (cur.isReaderOpen) {
+        fromBackNavRef.current = true;
+        setIsReaderOpen(false);
+      } else if (cur.selectedStoryId) {
+        fromBackNavRef.current = true;
+        setSelectedStoryId(null);
+      } else if (cur.tab !== 'library') {
+        fromBackNavRef.current = true;
+        setTab('library');
+      }
+    };
+
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, [toast]);
+
+  // 2) Native Capacitor Android Back bridge (called directly from MainActivity OnBackPressedCallback)
+  useEffect(() => {
+    const win = window as unknown as {
+      __handleAndroidBack?: () => 'handled' | 'exit';
+    };
+    win.__handleAndroidBack = () => {
+      const cur = navStateRef.current;
+      if (cur.hasConfirm) {
+        setConfirmState(null);
+        return 'handled';
+      }
+      if (cur.hasPlaylistModal) {
+        setPlaylistModalTarget(null);
+        return 'handled';
+      }
+      if (cur.isReaderOpen && readerBackInterceptorRef.current?.()) {
+        return 'handled';
+      }
+      if (cur.isReaderOpen) {
+        fromBackNavRef.current = true;
+        setIsReaderOpen(false);
+        return 'handled';
+      }
+      if (cur.selectedStoryId) {
+        fromBackNavRef.current = true;
+        setSelectedStoryId(null);
+        return 'handled';
+      }
+      if (cur.tab !== 'library') {
+        fromBackNavRef.current = true;
+        setTab('library');
+        return 'handled';
+      }
+      const now = Date.now();
+      if (now - lastBackExitAttemptRef.current < 2200) {
+        return 'exit';
+      }
+      lastBackExitAttemptRef.current = now;
+      toast('Nhấn Quay lại lần nữa để thoát ứng dụng');
+      return 'handled';
+    };
+    return () => {
+      delete win.__handleAndroidBack;
+    };
+  }, [toast]);
+
+  const handleStepBackFromReader = useCallback(() => {
+    const st = window.history.state as { __truyenRoute?: boolean; isReaderOpen?: boolean } | null;
+    if (st?.__truyenRoute && st.isReaderOpen) {
+      window.history.back();
+      return;
+    }
+    fromBackNavRef.current = true;
+    setIsReaderOpen(false);
+  }, []);
+
+  const handleStepBackFromDetail = useCallback(() => {
+    const st = window.history.state as { __truyenRoute?: boolean; selectedStoryId?: string | null } | null;
+    if (st?.__truyenRoute && st.selectedStoryId) {
+      window.history.back();
+      return;
+    }
+    fromBackNavRef.current = true;
+    setSelectedStoryId(null);
+  }, []);
+
   const refreshLocalData = useCallback(async () => {
     const [st, pl, pr, bm, sq, stats] = await Promise.all([
       getAllStories(),
@@ -580,31 +850,45 @@ export default function App() {
     refreshLocalData();
   }, [refreshLocalData, toast]);
 
-  // Load Vietnamese device TTS voices (offline voices prioritized)
+  // Load Vietnamese device TTS voices (Web Speech API + Android native bridge fallback)
   useEffect(() => {
-    if (!('speechSynthesis' in window)) return;
+    const hasWebSpeech = typeof window !== 'undefined' && 'speechSynthesis' in window;
     const loadVoices = () => {
-      const list = window.speechSynthesis.getVoices();
-      if (!list.length) return;
-      const viVoices = list.filter((v) => /^vi/i.test(v.lang) || /viet|việt/i.test(v.name));
-      const sorted = [
-        ...viVoices.filter((v) => v.localService),
-        ...viVoices.filter((v) => !v.localService),
-      ];
-      setVoices(sorted);
-      setSelectedVoiceName((prev) => {
-        if (!prev) return '';
-        return sorted.some((v) => v.name === prev) ? prev : '';
-      });
+      if (hasWebSpeech) {
+        const list = window.speechSynthesis.getVoices();
+        if (list.length) {
+          const viVoices = list.filter((v) => /^vi/i.test(v.lang) || /viet|việt/i.test(v.name));
+          const sorted = [
+            ...viVoices.filter((v) => v.localService),
+            ...viVoices.filter((v) => !v.localService),
+          ];
+          setVoices(sorted);
+          setSelectedVoiceName((prev) => {
+            if (!prev) return '';
+            return sorted.some((v) => v.name === prev) ? prev : '';
+          });
+          return;
+        }
+      }
+      if (isAndroidNativeTtsAvailable()) {
+        const nativeList = getAndroidNativeVoices();
+        if (nativeList.length > 0) {
+          setAndroidVoices(nativeList);
+        }
+      }
     };
     loadVoices();
     const retryT1 = window.setTimeout(loadVoices, 350);
     const retryT2 = window.setTimeout(loadVoices, 1200);
-    window.speechSynthesis.onvoiceschanged = loadVoices;
+    if (hasWebSpeech) {
+      window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
     return () => {
       window.clearTimeout(retryT1);
       window.clearTimeout(retryT2);
-      window.speechSynthesis.onvoiceschanged = null;
+      if (hasWebSpeech) {
+        window.speechSynthesis.onvoiceschanged = null;
+      }
     };
   }, []);
 
@@ -640,17 +924,37 @@ export default function App() {
   useEffect(() => {
     if (!isOnline) return;
     let cancelled = false;
-    fetch('/api/tts/status')
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data: { available?: boolean } | null) => {
-        if (cancelled || !data) return;
-        const next = data.available ? 'available' : 'missing_key';
-        setAiTtsStatus(next);
-        aiTtsStatusRef.current = next;
-      })
-      .catch(() => {
-        // Ignore transient status failure
-      });
+    const probe = async (base: string): Promise<{ ok: boolean; available?: boolean }> => {
+      try {
+        const res = await fetch(`${base}/api/tts/status`);
+        const ct = res.headers.get('content-type') || '';
+        if (!res.ok || !ct.includes('application/json')) return { ok: false };
+        const data = (await res.json()) as { available?: boolean };
+        return { ok: true, available: Boolean(data?.available) };
+      } catch {
+        return { ok: false };
+      }
+    };
+
+    (async () => {
+      const initial = ttsApiBaseRef.current;
+      let result = await probe(initial);
+      if (!result.ok) {
+        const fallback = getFallbackRemoteTtsBase();
+        if (fallback !== initial) {
+          const remoteRes = await probe(fallback);
+          if (remoteRes.ok) {
+            ttsApiBaseRef.current = fallback;
+            result = remoteRes;
+          }
+        }
+      }
+      if (cancelled || !result.ok) return;
+      const next = result.available ? 'available' : 'missing_key';
+      setAiTtsStatus(next);
+      aiTtsStatusRef.current = next;
+    })();
+
     return () => {
       cancelled = true;
     };
@@ -720,10 +1024,51 @@ export default function App() {
     }
   };
 
+  const clearSpeechProgressTimer = () => {
+    if (speechProgressTimerRef.current) {
+      window.clearInterval(speechProgressTimerRef.current);
+      speechProgressTimerRef.current = null;
+    }
+  };
+
+  const unlockMobileTtsAudio = useCallback(() => {
+    if (typeof window === 'undefined') return;
+    if (!ttsAudioRef.current) {
+      const el = new Audio();
+      el.setAttribute('playsinline', '');
+      ttsAudioRef.current = el;
+    }
+    if (ttsUnlockedRef.current) return;
+    const el = ttsAudioRef.current;
+    // Minimal 1-frame silent PCM WAV to preserve mobile browser user-gesture activation across async fetch
+    const silentWav =
+      'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
+    try {
+      el.src = silentWav;
+      el.muted = true;
+      const p = el.play();
+      if (p && typeof p.then === 'function') {
+        p.then(() => {
+          el.pause();
+          el.muted = false;
+          ttsUnlockedRef.current = true;
+        }).catch(() => {
+          el.muted = false;
+        });
+      } else {
+        el.muted = false;
+      }
+    } catch {
+      el.muted = false;
+    }
+  }, []);
+
   const stopTtsAudio = useCallback(() => {
+    clearSpeechProgressTimer();
     if (ttsAudioRef.current) {
       ttsAudioRef.current.onended = null;
       ttsAudioRef.current.onerror = null;
+      ttsAudioRef.current.ontimeupdate = null;
       ttsAudioRef.current.pause();
     }
     if (ttsAudioUrlRef.current) {
@@ -737,6 +1082,7 @@ export default function App() {
     (syncCloud = true) => {
       speechTokenRef.current++;
       clearWatchdog();
+      clearSpeechProgressTimer();
       if (speakDelayRef.current) {
         window.clearTimeout(speakDelayRef.current);
         speakDelayRef.current = null;
@@ -745,6 +1091,7 @@ export default function App() {
       if ('speechSynthesis' in window) {
         window.speechSynthesis.cancel();
       }
+      stopAndroidNativeTts();
       stopTtsAudio();
       if (nativeAudioRef.current) {
         nativeAudioRef.current.pause();
@@ -924,12 +1271,28 @@ export default function App() {
         return null;
       }
 
-      try {
-        const res = await fetch('/api/tts', {
+      const tryPostTts = async (base: string) => {
+        return fetch(`${base}/api/tts`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text: trimmed, voiceProfileId: profileId }),
         });
+      };
+
+      try {
+        let res = await tryPostTts(ttsApiBaseRef.current);
+        const ct = res.headers.get('content-type') || '';
+        if (
+          (res.status === 404 || ct.includes('text/html')) &&
+          ttsApiBaseRef.current !== getFallbackRemoteTtsBase()
+        ) {
+          const remoteBase = getFallbackRemoteTtsBase();
+          const remoteRes = await tryPostTts(remoteBase);
+          if (remoteRes.ok || remoteRes.status === 503) {
+            ttsApiBaseRef.current = remoteBase;
+            res = remoteRes;
+          }
+        }
 
         if (res.status === 503) {
           const payload = (await res.json().catch(() => null)) as { error?: string } | null;
@@ -1002,6 +1365,7 @@ export default function App() {
 
       const token = ++speechTokenRef.current;
       clearWatchdog();
+      clearSpeechProgressTimer();
       if (speakDelayRef.current) {
         window.clearTimeout(speakDelayRef.current);
         speakDelayRef.current = null;
@@ -1009,10 +1373,12 @@ export default function App() {
       if ('speechSynthesis' in window) {
         window.speechSynthesis.cancel();
       }
+      stopAndroidNativeTts();
       stopTtsAudio();
 
       setChunkIndex(startIndex);
       chunkIndexRef.current = startIndex;
+      setSpeechChunkProgress(0);
 
       const chunkText = list[startIndex].t;
       const { profile, chosen, effectiveRate } = resolveVietnameseUtteranceSettings();
@@ -1033,17 +1399,32 @@ export default function App() {
             ttsAudioRef.current = new Audio();
           }
           const audio = ttsAudioRef.current;
+          audio.setAttribute('playsinline', '');
+          audio.muted = false;
           audio.src = url;
           audio.playbackRate = Math.min(2.5, Math.max(0.5, effectiveRate));
           setIsAiAudioActive(true);
 
           try {
-            await resumeAndSyncEqualizer(audio, eqGainsRef.current, {
-              isVoiceStream: true,
-              advancedFilter: advFilterRef.current,
-            });
+            try {
+              await resumeAndSyncEqualizer(audio, eqGainsRef.current, {
+                isVoiceStream: true,
+                advancedFilter: advFilterRef.current,
+              });
+            } catch {
+              // Proceed with direct HTMLAudioElement playback if WebAudio graph fails on mobile WebView
+            }
+
+            audio.ontimeupdate = () => {
+              if (token !== speechTokenRef.current || !playingRef.current) return;
+              if (audio.duration > 0 && Number.isFinite(audio.duration)) {
+                setSpeechChunkProgress(Math.min(1, Math.max(0, audio.currentTime / audio.duration)));
+              }
+            };
             audio.onended = () => {
               if (token !== speechTokenRef.current || !playingRef.current) return;
+              clearSpeechProgressTimer();
+              setSpeechChunkProgress(1);
               const nextIdx = startIndex + 1;
               if (sid && nextIdx % 4 === 0) {
                 saveProgress(sid, activeChapterIdxRef.current, nextIdx, 0, list.length, chTitle, false);
@@ -1052,10 +1433,18 @@ export default function App() {
             };
             audio.onerror = () => {
               if (token !== speechTokenRef.current || !playingRef.current) return;
+              clearSpeechProgressTimer();
               setIsAiAudioActive(false);
               void speakCurrentChunk(startIndex + 1);
             };
+
             await audio.play();
+            speechProgressTimerRef.current = window.setInterval(() => {
+              if (token !== speechTokenRef.current || !playingRef.current) return;
+              if (audio.duration > 0 && Number.isFinite(audio.duration)) {
+                setSpeechChunkProgress(Math.min(1, Math.max(0, audio.currentTime / audio.duration)));
+              }
+            }, 90);
             prefetchNextAiChunks(startIndex, profile.id, chId);
             return;
           } catch {
@@ -1064,8 +1453,86 @@ export default function App() {
         }
       }
 
-      if (!('speechSynthesis' in window)) {
-        toast('Trình duyệt này chưa hỗ trợ đọc giọng nói.');
+      const hasWebSpeechApi =
+        typeof window !== 'undefined' &&
+        'speechSynthesis' in window &&
+        typeof window.SpeechSynthesisUtterance !== 'undefined';
+
+      // Fallback 1: Native Android TextToSpeech Bridge (for Capacitor APK where window.speechSynthesis is absent)
+      if (!hasWebSpeechApi && isAndroidNativeTtsAvailable()) {
+        setIsAiAudioActive(false);
+        const startMs = Date.now();
+        const estimatedTotalMs = Math.max(
+          1500,
+          Math.round((chunkText.length / (13.5 * effectiveRate)) * 1000)
+        );
+        let nativeProgressReceived = false;
+
+        speechProgressTimerRef.current = window.setInterval(() => {
+          if (token !== speechTokenRef.current || !playingRef.current || nativeProgressReceived) {
+            return;
+          }
+          const ratio = Math.min(0.98, (Date.now() - startMs) / estimatedTotalMs);
+          setSpeechChunkProgress(ratio);
+        }, 100);
+
+        const started = speakAndroidNativeTts(
+          `chunk_${token}_${startIndex}`,
+          chunkText,
+          effectiveRate,
+          profile.pitch,
+          selectedVoiceRef.current,
+          {
+            onProgress: (ratio) => {
+              if (token !== speechTokenRef.current || !playingRef.current) return;
+              nativeProgressReceived = true;
+              setSpeechChunkProgress(ratio);
+            },
+            onDone: () => {
+              clearWatchdog();
+              clearSpeechProgressTimer();
+              if (token !== speechTokenRef.current || !playingRef.current) return;
+              setSpeechChunkProgress(1);
+              const nextIdx = startIndex + 1;
+              if (sid && nextIdx % 4 === 0) {
+                saveProgress(sid, activeChapterIdxRef.current, nextIdx, 0, list.length, chTitle, false);
+              }
+              void speakCurrentChunk(nextIdx);
+            },
+            onError: () => {
+              clearWatchdog();
+              clearSpeechProgressTimer();
+              if (token !== speechTokenRef.current || !playingRef.current) return;
+              void speakCurrentChunk(startIndex + 1);
+            },
+          }
+        );
+
+        if (started) {
+          const approxMs = Math.max(
+            12000,
+            Math.round((chunkText.length / (10 * effectiveRate)) * 1000) + 9000
+          );
+          watchdogRef.current = window.setTimeout(() => {
+            if (token === speechTokenRef.current && playingRef.current) {
+              stopAndroidNativeTts();
+              void speakCurrentChunk(startIndex + 1);
+            }
+          }, approxMs);
+          return;
+        }
+        clearSpeechProgressTimer();
+      }
+
+      if (!hasWebSpeechApi) {
+        setIsPlaying(false);
+        playingRef.current = false;
+        keepAliveEngine.stop();
+        toast(
+          isOnlineRef.current
+            ? 'Thiết bị không hỗ trợ giọng đọc hệ thống — hãy chọn Giọng AI Tiếng Việt hoặc kiểm tra kết nối mạng.'
+            : 'Thiết bị không hỗ trợ giọng đọc ngoại tuyến — hãy bật mạng để phát Giọng AI Tiếng Việt.'
+        );
         return;
       }
 
@@ -1083,9 +1550,37 @@ export default function App() {
       utterance.pitch = profile.pitch;
       utterance.rate = effectiveRate;
 
+      let boundaryTriggered = false;
+      const estimatedSpeechMs = Math.max(
+        1400,
+        Math.round((chunkText.length / (13.5 * effectiveRate)) * 1000)
+      );
+      let speakStartedAt = Date.now();
+
+      utterance.onstart = () => {
+        if (token !== speechTokenRef.current || !playingRef.current) return;
+        speakStartedAt = Date.now();
+      };
+
+      utterance.onboundary = (ev) => {
+        if (token !== speechTokenRef.current || !playingRef.current) return;
+        if (typeof ev.charIndex === 'number' && chunkText.length > 0) {
+          boundaryTriggered = true;
+          setSpeechChunkProgress(Math.min(1, Math.max(0, ev.charIndex / chunkText.length)));
+        }
+      };
+
+      speechProgressTimerRef.current = window.setInterval(() => {
+        if (token !== speechTokenRef.current || !playingRef.current || boundaryTriggered) return;
+        const ratio = Math.min(0.98, Math.max(0, (Date.now() - speakStartedAt) / estimatedSpeechMs));
+        setSpeechChunkProgress(ratio);
+      }, 95);
+
       utterance.onend = () => {
         clearWatchdog();
+        clearSpeechProgressTimer();
         if (token !== speechTokenRef.current || !playingRef.current) return;
+        setSpeechChunkProgress(1);
         const nextIdx = startIndex + 1;
         if (sid && nextIdx % 4 === 0) {
           saveProgress(sid, activeChapterIdxRef.current, nextIdx, 0, list.length, chTitle, false);
@@ -1095,6 +1590,7 @@ export default function App() {
 
       utterance.onerror = (ev) => {
         clearWatchdog();
+        clearSpeechProgressTimer();
         if (
           token !== speechTokenRef.current ||
           ev.error === 'canceled' ||
@@ -1122,6 +1618,7 @@ export default function App() {
       speakDelayRef.current = window.setTimeout(() => {
         speakDelayRef.current = null;
         if (token === speechTokenRef.current && playingRef.current) {
+          speakStartedAt = Date.now();
           if (window.speechSynthesis.paused) {
             window.speechSynthesis.resume();
           }
@@ -1145,8 +1642,10 @@ export default function App() {
       void speakCurrentChunk(chunkIndexRef.current);
       return;
     }
+    unlockMobileTtsAudio();
     const token = ++speechTokenRef.current;
     clearWatchdog();
+    clearSpeechProgressTimer();
     if (speakDelayRef.current) {
       window.clearTimeout(speakDelayRef.current);
       speakDelayRef.current = null;
@@ -1154,6 +1653,7 @@ export default function App() {
     if ('speechSynthesis' in window) {
       window.speechSynthesis.cancel();
     }
+    stopAndroidNativeTts();
     stopTtsAudio();
 
     const { profile, chosen, effectiveRate } = resolveVietnameseUtteranceSettings();
@@ -1169,13 +1669,19 @@ export default function App() {
           ttsAudioRef.current = new Audio();
         }
         const audio = ttsAudioRef.current;
+        audio.setAttribute('playsinline', '');
+        audio.muted = false;
         audio.src = url;
         audio.playbackRate = Math.min(2.5, Math.max(0.5, effectiveRate));
         try {
-          await resumeAndSyncEqualizer(audio, eqGainsRef.current, {
-            isVoiceStream: true,
-            advancedFilter: advFilterRef.current,
-          });
+          try {
+            await resumeAndSyncEqualizer(audio, eqGainsRef.current, {
+              isVoiceStream: true,
+              advancedFilter: advFilterRef.current,
+            });
+          } catch {
+            // Allow plain audio playback if WebAudio fails on mobile WebView
+          }
           audio.onended = () => {
             if (ttsAudioUrlRef.current === url) {
               URL.revokeObjectURL(url);
@@ -1190,8 +1696,25 @@ export default function App() {
       }
     }
 
-    if (!('speechSynthesis' in window)) {
-      toast('Trình duyệt này chưa hỗ trợ đọc giọng nói.');
+    const hasWebSpeechApi =
+      typeof window !== 'undefined' &&
+      'speechSynthesis' in window &&
+      typeof window.SpeechSynthesisUtterance !== 'undefined';
+
+    if (!hasWebSpeechApi && isAndroidNativeTtsAvailable()) {
+      const started = speakAndroidNativeTts(
+        `preview_${token}`,
+        sampleText,
+        effectiveRate,
+        profile.pitch,
+        selectedVoiceRef.current,
+        {}
+      );
+      if (started) return;
+    }
+
+    if (!hasWebSpeechApi) {
+      toast('Thiết bị không hỗ trợ giọng đọc hệ thống — hãy bật mạng để nghe Giọng AI Tiếng Việt.');
       return;
     }
 
@@ -1215,7 +1738,14 @@ export default function App() {
         window.speechSynthesis.speak(sample);
       }
     }, 90);
-  }, [fetchOrLoadAiTtsChunk, resolveVietnameseUtteranceSettings, speakCurrentChunk, stopTtsAudio, toast]);
+  }, [
+    fetchOrLoadAiTtsChunk,
+    resolveVietnameseUtteranceSettings,
+    speakCurrentChunk,
+    stopTtsAudio,
+    toast,
+    unlockMobileTtsAudio,
+  ]);
 
   const handleCacheChapterAiVoice = useCallback(async () => {
     const ch = activeChapterContentRef.current;
@@ -1249,6 +1779,9 @@ export default function App() {
 
   const startPlayback = useCallback(async () => {
     if (!activeChapterContent) return;
+    if (!activeChapterContent.audioBlob) {
+      unlockMobileTtsAudio();
+    }
     setIsPlaying(true);
     playingRef.current = true;
 
@@ -1281,10 +1814,14 @@ export default function App() {
     if (activeChapterContent.audioBlob && nativeAudioRef.current) {
       nativeAudioRef.current.playbackRate = rateRef.current;
       try {
-        await resumeAndSyncEqualizer(nativeAudioRef.current, eqGainsRef.current, {
-          isVoiceStream: true,
-          advancedFilter: advFilterRef.current,
-        });
+        try {
+          await resumeAndSyncEqualizer(nativeAudioRef.current, eqGainsRef.current, {
+            isVoiceStream: true,
+            advancedFilter: advFilterRef.current,
+          });
+        } catch {
+          // Allow playback directly if WebAudio graph fails on mobile
+        }
         await nativeAudioRef.current.play();
         if (ambientModeRef.current !== 'silent') {
           await keepAliveEngine.start(ambientModeRef.current);
@@ -1299,6 +1836,7 @@ export default function App() {
       } catch {
         toast('Nhấn lại nút Phát để trình duyệt kích hoạt âm thanh.');
         setIsPlaying(false);
+        playingRef.current = false;
       }
       return;
     }
@@ -1310,7 +1848,7 @@ export default function App() {
       });
     }
     speakCurrentChunk(chunkIndexRef.current);
-  }, [activeChapterContent, saveProgress, speakCurrentChunk, toast]);
+  }, [activeChapterContent, saveProgress, speakCurrentChunk, toast, unlockMobileTtsAudio]);
 
   const mediaHandlersRef = useRef({
     onPlay: () => startPlayback(),
@@ -1377,6 +1915,9 @@ export default function App() {
       ctx: PlaybackContext = { mode: 'story' },
       overridePos?: { chunkIndex?: number; audioTime?: number }
     ) => {
+      if (autoPlay) {
+        unlockMobileTtsAudio();
+      }
       const targetStory = storiesRef.current.find((s) => s.id === storyId);
       if (!targetStory) return;
       const summary = targetStory.chapters[chapterIdx];
@@ -1384,7 +1925,10 @@ export default function App() {
 
       speechTokenRef.current++;
       clearWatchdog();
+      clearSpeechProgressTimer();
+      setSpeechChunkProgress(0);
       if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+      stopAndroidNativeTts();
       stopTtsAudio();
       if (nativeAudioRef.current) {
         nativeAudioRef.current.pause();
@@ -1557,6 +2101,7 @@ export default function App() {
       speakCurrentChunk,
       stopTtsAudio,
       toast,
+      unlockMobileTtsAudio,
     ]
   );
 
@@ -2436,50 +2981,60 @@ export default function App() {
         </div>
       </aside>
 
-      {/* Mobile Compact Sticky Top Bar */}
-      <header className="md:hidden sticky top-0 z-30 pt-safe border-b border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-[#161920]/95 backdrop-blur-md">
-        <div className="h-14 px-4 flex items-center justify-between gap-3">
-          <div
-            onClick={() => {
-              setTab('library');
-              setSelectedStoryId(null);
-              setIsReaderOpen(false);
-            }}
-            className="flex items-center gap-2.5 min-w-0 cursor-pointer"
-          >
-            <img src="/icon.svg" alt="Truyện Audio" className="w-7 h-7 rounded-lg shrink-0" />
-            <span className="text-base font-bold tracking-tight truncate">Truyện Audio</span>
-          </div>
-          <div className="flex items-center gap-2 shrink-0">
-            <PWAInstallButton compact />
-            <button
-              onClick={quickToggleDark}
-              aria-label="Đổi chế độ sáng tối"
-              className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-200 cursor-pointer"
+      {/* Mobile Compact Sticky Top Bar (hidden during immersive full-screen reading) */}
+      {!(isReaderOpen && activeStory && activeChapterContent) && (
+        <header className="md:hidden sticky top-0 z-30 pt-safe border-b border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-[#161920]/95 backdrop-blur-md">
+          <div className="h-14 px-4 flex items-center justify-between gap-3">
+            <div
+              onClick={() => {
+                setTab('library');
+                setSelectedStoryId(null);
+                setIsReaderOpen(false);
+              }}
+              className="flex items-center gap-2.5 min-w-0 cursor-pointer"
             >
-              {theme === 'dark' ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
-            </button>
+              <img src="/icon.svg" alt="Truyện Audio" className="w-7 h-7 rounded-lg shrink-0" />
+              <span className="text-base font-bold tracking-tight truncate">Truyện Audio</span>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <PWAInstallButton compact />
+              <button
+                onClick={quickToggleDark}
+                aria-label="Đổi chế độ sáng tối"
+                className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-200 cursor-pointer"
+              >
+                {theme === 'dark' ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
+              </button>
+            </div>
           </div>
-        </div>
-      </header>
+        </header>
+      )}
 
       {/* Main Content Area */}
       <main
         className={`flex-1 md:pl-64 min-w-0 ${
           isReaderOpen && activeStory && activeChapterContent
-            ? 'pb-6'
+            ? ''
             : activeStory && activeChapterContent && !isReaderOpen
               ? 'pb-[calc(9.5rem+env(safe-area-inset-bottom,0px))] md:pb-24'
               : 'pb-[calc(5.75rem+env(safe-area-inset-bottom,0px))] md:pb-12'
         }`}
       >
-        <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-5 sm:py-8">
-          <OfflineBanner
-            pendingSyncCount={pendingSyncCount}
-            isSyncing={isSyncing}
-            quotaExceeded={quotaExceeded}
-            onSyncNow={() => handleSyncNow(undefined, true)}
-          />
+        <div
+          className={
+            isReaderOpen && activeStory && activeChapterContent
+              ? 'w-full'
+              : 'max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-5 sm:py-8'
+          }
+        >
+          {!(isReaderOpen && activeStory && activeChapterContent) && (
+            <OfflineBanner
+              pendingSyncCount={pendingSyncCount}
+              isSyncing={isSyncing}
+              quotaExceeded={quotaExceeded}
+              onSyncNow={() => handleSyncNow(undefined, true)}
+            />
+          )}
 
           {isReaderOpen && activeStory && activeChapterContent ? (
             <ReaderPlayerView
@@ -2488,11 +3043,12 @@ export default function App() {
               chapterIndex={activeChapterIndex}
               chunks={chunks}
               chunkIndex={chunkIndex}
+              speechChunkProgress={speechChunkProgress}
               isPlaying={isPlaying}
               isNativeAudio={!!activeChapterContent.audioBlob}
               audioCurrentTime={audioCurrentTime}
               audioDuration={audioDuration}
-              voices={voices}
+              voices={voices.length > 0 ? voices : (androidVoices as unknown as SpeechSynthesisVoice[])}
               selectedVoiceName={selectedVoiceName}
               voiceProfileId={voiceProfileId}
               voiceEnginePreference={voiceEnginePreference}
@@ -2511,7 +3067,8 @@ export default function App() {
               autoPlayNext={autoPlayNext}
               blueLightFilter={blueLightFilter}
               playlistLabel={activePlaylistLabel}
-              onBack={() => setIsReaderOpen(false)}
+              backInterceptorRef={readerBackInterceptorRef}
+              onBack={handleStepBackFromReader}
               onTogglePlay={() => (isPlaying ? pausePlayback(true) : startPlayback())}
               onPrevChapter={() => handleAdvanceChapter(-1)}
               onNextChapter={() => handleAdvanceChapter(1)}
@@ -2815,7 +3372,7 @@ export default function App() {
               isOnline={isOnline}
               isDownloadingAll={downloadingStoryId === selectedStory.id}
               downloadProgressText={downloadProgressText}
-              onBack={() => setSelectedStoryId(null)}
+              onBack={handleStepBackFromDetail}
               onOpenStory={(sid) => {
                 setSelectedStoryId(sid);
                 window.scrollTo({ top: 0, behavior: 'smooth' });

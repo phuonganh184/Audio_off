@@ -10,8 +10,9 @@ import {
   Eye,
   Gauge,
   Keyboard,
-  Lock,
+  LocateFixed,
   Minus,
+  Palette,
   Pause,
   Play,
   Plus,
@@ -30,13 +31,13 @@ import {
   X,
 } from 'lucide-react';
 import { NightScheduleCard } from '@/src/components/NightScheduleCard';
-import { StoryCover } from '@/src/components/StoryCover';
 import type { EqGains } from '@/src/lib/audioEqualizer';
 import {
   AUDIO_FILTER_PRESETS,
   EQ_BANDS,
   EQ_PRESETS,
   OFFLINE_VOICE_PROFILES,
+  READER_PASTEL_THEMES,
   type AdvancedAudioFilterState,
   type AmbientMode,
   type AudioFilterPresetId,
@@ -44,6 +45,7 @@ import {
   type ChapterContent,
   type EqPresetId,
   type NightScheduleConfig,
+  type ReaderBgThemeId,
   type Story,
   type TextChunk,
   type VoiceProfileId,
@@ -55,6 +57,7 @@ interface Props {
   chapterIndex: number;
   chunks: TextChunk[];
   chunkIndex: number;
+  speechChunkProgress?: number;
   isPlaying: boolean;
   isNativeAudio: boolean;
   audioCurrentTime: number;
@@ -85,6 +88,7 @@ interface Props {
   nightSchedule: NightScheduleConfig;
   nightScheduleActive: boolean;
   playlistLabel?: string;
+  backInterceptorRef?: React.MutableRefObject<(() => boolean) | null>;
   onBack: () => void;
   onTogglePlay: () => void;
   onPrevChapter: () => void;
@@ -145,6 +149,7 @@ export const ReaderPlayerView: React.FC<Props> = ({
   chapterIndex,
   chunks,
   chunkIndex,
+  speechChunkProgress = 0,
   isPlaying,
   isNativeAudio,
   audioCurrentTime,
@@ -170,6 +175,7 @@ export const ReaderPlayerView: React.FC<Props> = ({
   nightSchedule,
   nightScheduleActive,
   playlistLabel,
+  backInterceptorRef,
   onBack,
   onTogglePlay,
   onPrevChapter,
@@ -221,11 +227,167 @@ export const ReaderPlayerView: React.FC<Props> = ({
   });
   const [handsFreePaused, setHandsFreePaused] = useState(false);
   const [scrollProgressPercent, setScrollProgressPercent] = useState(0);
+  const [controlsVisible, setControlsVisible] = useState(true);
+  const [showBgPicker, setShowBgPicker] = useState(false);
+  const [readerBgTheme, setReaderBgTheme] = useState<ReaderBgThemeId>(() => {
+    try {
+      const saved = localStorage.getItem('truyen_audio_reader_bg_v1') as ReaderBgThemeId | null;
+      return saved && READER_PASTEL_THEMES.some((t) => t.id === saved) ? saved : 'default';
+    } catch {
+      return 'default';
+    }
+  });
+  const [autoScrollSync, setAutoScrollSync] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('truyen_audio_auto_scroll_sync');
+      return saved === null ? true : saved === 'true';
+    } catch {
+      return true;
+    }
+  });
+  const [userScrolledAway, setUserScrolledAway] = useState(false);
 
   const activeSpanRef = useRef<HTMLSpanElement | null>(null);
+  const activeWordRef = useRef<HTMLSpanElement | null>(null);
   const proseCardRef = useRef<HTMLDivElement | null>(null);
   const manualScrollPauseUntilRef = useRef<number>(0);
+  const manualSyncPauseUntilRef = useRef<number>(0);
   const scrolledChapterIdRef = useRef<string | null>(null);
+  const touchStartYRef = useRef<number | null>(null);
+  const didSwipeGestureRef = useRef(false);
+
+  useEffect(() => {
+    if (!backInterceptorRef) return;
+    backInterceptorRef.current = () => {
+      if (showBookmarkModal) {
+        setShowBookmarkModal(false);
+        return true;
+      }
+      if (drawerTab !== 'none') {
+        setDrawerTab('none');
+        return true;
+      }
+      if (showBgPicker) {
+        setShowBgPicker(false);
+        return true;
+      }
+      return false;
+    };
+    return () => {
+      backInterceptorRef.current = null;
+    };
+  }, [backInterceptorRef, drawerTab, showBgPicker, showBookmarkModal]);
+
+  // Hide top & bottom action bars automatically when the user scrolls/swipes the reading canvas
+  useEffect(() => {
+    const isInsideReaderChrome = (target: EventTarget | null) =>
+      target instanceof HTMLElement && !!target.closest('[data-reader-chrome="true"]');
+
+    const hideChromeOnScroll = () => {
+      setControlsVisible(false);
+      setDrawerTab('none');
+      setShowBgPicker(false);
+    };
+
+    const onTouchStart = (e: TouchEvent) => {
+      didSwipeGestureRef.current = false;
+      if (isInsideReaderChrome(e.target)) {
+        touchStartYRef.current = null;
+        return;
+      }
+      touchStartYRef.current = e.touches[0]?.clientY ?? null;
+    };
+
+    const onTouchMove = (e: TouchEvent) => {
+      if (touchStartYRef.current === null || isInsideReaderChrome(e.target)) return;
+      const curY = e.touches[0]?.clientY ?? touchStartYRef.current;
+      if (Math.abs(curY - touchStartYRef.current) > 14) {
+        didSwipeGestureRef.current = true;
+        hideChromeOnScroll();
+      }
+    };
+
+    const onWheel = (e: WheelEvent) => {
+      if (isInsideReaderChrome(e.target)) return;
+      if (Math.abs(e.deltaY) > 6) {
+        hideChromeOnScroll();
+      }
+    };
+
+    window.addEventListener('touchstart', onTouchStart, { passive: true });
+    window.addEventListener('touchmove', onTouchMove, { passive: true });
+    window.addEventListener('wheel', onWheel, { passive: true });
+    return () => {
+      window.removeEventListener('touchstart', onTouchStart);
+      window.removeEventListener('touchmove', onTouchMove);
+      window.removeEventListener('wheel', onWheel);
+    };
+  }, []);
+
+  const handleProseAreaTap = () => {
+    if (didSwipeGestureRef.current) {
+      didSwipeGestureRef.current = false;
+      return;
+    }
+    const sel = window.getSelection?.()?.toString().trim();
+    if (sel) return;
+
+    if (showBgPicker || drawerTab !== 'none') {
+      setShowBgPicker(false);
+      setDrawerTab('none');
+      return;
+    }
+    setControlsVisible((v) => !v);
+  };
+
+  const activeTheme = useMemo(
+    () => READER_PASTEL_THEMES.find((t) => t.id === readerBgTheme) || READER_PASTEL_THEMES[0],
+    [readerBgTheme]
+  );
+
+  const selectReaderBgTheme = (id: ReaderBgThemeId) => {
+    setReaderBgTheme(id);
+    try {
+      localStorage.setItem('truyen_audio_reader_bg_v1', id);
+    } catch {}
+  };
+
+  const toggleAutoScrollSync = () => {
+    setAutoScrollSync((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('truyen_audio_auto_scroll_sync', String(next));
+      } catch {}
+      if (next) {
+        manualSyncPauseUntilRef.current = 0;
+        setUserScrolledAway(false);
+        window.requestAnimationFrame(() => {
+          (activeWordRef.current || activeSpanRef.current)?.scrollIntoView({
+            block: 'center',
+            behavior: 'smooth',
+          });
+        });
+      }
+      return next;
+    });
+  };
+
+  const snapBackToActiveSpeech = () => {
+    manualSyncPauseUntilRef.current = 0;
+    setUserScrolledAway(false);
+    if (!autoScrollSync) {
+      setAutoScrollSync(true);
+      try {
+        localStorage.setItem('truyen_audio_auto_scroll_sync', 'true');
+      } catch {}
+    }
+    window.requestAnimationFrame(() => {
+      (activeWordRef.current || activeSpanRef.current)?.scrollIntoView({
+        block: 'center',
+        behavior: 'smooth',
+      });
+    });
+  };
 
   const currentExcerpt = useMemo(() => {
     if (isNativeAudio || chunks.length === 0) {
@@ -314,28 +476,101 @@ export const ReaderPlayerView: React.FC<Props> = ({
     };
   }, [chapter.id, fontSize, chunks.length]);
 
-  // Keep active TTS chunk visible when playing TTS or when opening a chapter at a saved/bookmarked offset
+  // Map native audio playback time proportionally across text chunks when both audio & text exist
+  const chunkCharRanges = useMemo(() => {
+    let acc = 0;
+    const ranges = chunks.map((c) => {
+      const start = acc;
+      const len = Math.max(1, c.t.trim().length);
+      acc += len;
+      return { start, end: acc };
+    });
+    return { totalChars: Math.max(1, acc), ranges };
+  }, [chunks]);
+
+  const { effectiveChunkIndex, effectiveSubProgress } = useMemo(() => {
+    if (!isNativeAudio) {
+      if (chunks.length === 0) return { effectiveChunkIndex: -1, effectiveSubProgress: 0 };
+      return {
+        effectiveChunkIndex: Math.min(Math.max(0, chunkIndex), chunks.length - 1),
+        effectiveSubProgress: Math.min(1, Math.max(0, speechChunkProgress)),
+      };
+    }
+    if (chunks.length > 0 && audioDuration > 0) {
+      const ratio = Math.min(0.9999, Math.max(0, audioCurrentTime / audioDuration));
+      const targetChar = ratio * chunkCharRanges.totalChars;
+      const idx = chunkCharRanges.ranges.findIndex((r) => targetChar < r.end);
+      const safeIdx = idx >= 0 ? idx : chunks.length - 1;
+      const range = chunkCharRanges.ranges[safeIdx];
+      const sub = range
+        ? Math.min(1, Math.max(0, (targetChar - range.start) / Math.max(1, range.end - range.start)))
+        : 0;
+      return { effectiveChunkIndex: safeIdx, effectiveSubProgress: sub };
+    }
+    return { effectiveChunkIndex: -1, effectiveSubProgress: 0 };
+  }, [audioCurrentTime, audioDuration, chunkCharRanges, chunkIndex, chunks.length, isNativeAudio, speechChunkProgress]);
+
+  const activeWordBucket = Math.floor(effectiveSubProgress * 24);
+
+  // Detect manual scrolling while speech auto-scroll sync is active so we don't fight the reader
   useEffect(() => {
-    if (!isNativeAudio && isPlaying && activeSpanRef.current) {
-      activeSpanRef.current.scrollIntoView({ block: 'center', behavior: 'smooth' });
-      scrolledChapterIdRef.current = chapter.id;
+    if (!isPlaying || !autoScrollSync) {
+      setUserScrolledAway(false);
       return;
     }
-    if (!isNativeAudio && chunkIndex > 0 && scrolledChapterIdRef.current !== chapter.id) {
-      scrolledChapterIdRef.current = chapter.id;
-      window.requestAnimationFrame(() => {
-        activeSpanRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' });
-      });
-    } else if (scrolledChapterIdRef.current !== chapter.id) {
-      scrolledChapterIdRef.current = chapter.id;
-    }
-  }, [chapter.id, chunkIndex, isNativeAudio, isPlaying]);
+    const handleUserScrollInput = () => {
+      manualSyncPauseUntilRef.current = Date.now() + 3200;
+      setUserScrolledAway(true);
+    };
+    window.addEventListener('wheel', handleUserScrollInput, { passive: true });
+    window.addEventListener('touchstart', handleUserScrollInput, { passive: true });
+    return () => {
+      window.removeEventListener('wheel', handleUserScrollInput);
+      window.removeEventListener('touchstart', handleUserScrollInput);
+    };
+  }, [autoScrollSync, isPlaying]);
 
-  // Continuous hands-free auto-scroll loop (works alongside native MP3/M4A audio or silent reading)
+  // Keep active spoken word/sentence smoothly centered inside the readable viewport
+  useEffect(() => {
+    if (effectiveChunkIndex < 0) {
+      if (scrolledChapterIdRef.current !== chapter.id) {
+        scrolledChapterIdRef.current = chapter.id;
+      }
+      return;
+    }
+
+    if (scrolledChapterIdRef.current !== chapter.id) {
+      scrolledChapterIdRef.current = chapter.id;
+      if (effectiveChunkIndex > 0 || isPlaying) {
+        window.requestAnimationFrame(() => {
+          (activeWordRef.current || activeSpanRef.current)?.scrollIntoView({
+            block: 'center',
+            behavior: 'smooth',
+          });
+        });
+      }
+      return;
+    }
+
+    if (!isPlaying || !autoScrollSync) return;
+    if (Date.now() <= manualSyncPauseUntilRef.current) return;
+
+    const targetEl = activeWordRef.current || activeSpanRef.current;
+    if (!targetEl) return;
+
+    const rect = targetEl.getBoundingClientRect();
+    const topBound = window.innerHeight * 0.22;
+    const bottomBound = window.innerHeight * 0.66;
+    if (rect.top < topBound || rect.bottom > bottomBound) {
+      targetEl.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      setUserScrolledAway(false);
+    }
+  }, [activeWordBucket, autoScrollSync, chapter.id, effectiveChunkIndex, isPlaying]);
+
+  // Continuous hands-free auto-scroll loop (silent reading or when autoScrollSync is turned off)
   useEffect(() => {
     if (!handsFreeMode || handsFreePaused) return;
-    // When TTS is actively playing, activeSpanRef scrollIntoView keeps text synced automatically
-    if (!isNativeAudio && isPlaying) return;
+    if (isPlaying && autoScrollSync && effectiveChunkIndex >= 0) return;
 
     const pauseOnUserInput = () => {
       manualScrollPauseUntilRef.current = Date.now() + 2200;
@@ -380,7 +615,7 @@ export const ReaderPlayerView: React.FC<Props> = ({
       window.removeEventListener('wheel', pauseOnUserInput);
       window.removeEventListener('touchstart', pauseOnUserInput);
     };
-  }, [handsFreeMode, handsFreePaused, handsFreeSpeed, isNativeAudio, isPlaying]);
+  }, [autoScrollSync, effectiveChunkIndex, handsFreeMode, handsFreePaused, handsFreeSpeed, isPlaying]);
 
   const paragraphs = useMemo(() => {
     const groups: { pIdx: number; items: { idx: number; text: string }[] }[] = [];
@@ -513,213 +748,312 @@ export const ReaderPlayerView: React.FC<Props> = ({
   }, []);
 
   return (
-    <div className="space-y-4 pb-[calc(11rem+env(safe-area-inset-bottom,0px))] md:pb-44">
-      {/* Top Navigation & Quick Font Size */}
-      <div className="flex items-center justify-between gap-2">
-        <button
-          onClick={onBack}
-          className="min-h-[44px] inline-flex items-center gap-1.5 px-2.5 sm:px-3 rounded-xl text-sm font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-200/70 dark:hover:bg-slate-800 shrink-0 cursor-pointer"
-        >
-          <ArrowLeft className="w-4 h-4" />
-          <span>Quay lại</span>
-        </button>
+    <div
+      className={`min-h-[100dvh] w-full transition-colors duration-200 ${activeTheme.cardBgClass} border-0`}
+    >
+      {/* Overlay Top Navigation & Quick Appearance Bar (Tap screen to show, Scroll to hide) */}
+      <div
+        data-reader-chrome="true"
+        className={`dark fixed top-0 left-0 right-0 md:left-64 z-30 pt-safe text-slate-100 backdrop-blur-xl backdrop-saturate-150 border-b border-white/15 shadow-[0_8px_32px_rgba(0,0,0,0.28)] ring-1 ring-inset ring-white/5 transition-all duration-200 ease-out ${
+          showBgPicker ? 'bg-[#0B0E14]/84' : 'bg-[#0B0E14]/72'
+        } ${
+          controlsVisible
+            ? 'translate-y-0 opacity-100'
+            : '-translate-y-full opacity-0 pointer-events-none'
+        }`}
+      >
+        <div className="max-w-3xl mx-auto px-3 sm:px-6">
+          <div className="h-14 flex items-center justify-between gap-2">
+            <button
+              type="button"
+              onClick={onBack}
+              aria-label="Quay lại chi tiết truyện"
+              className="min-h-[44px] min-w-[44px] -ml-1.5 inline-flex items-center justify-center rounded-xl text-slate-100 hover:bg-white/12 shrink-0 cursor-pointer transition-colors"
+            >
+              <ArrowLeft className="w-5 h-5" />
+            </button>
 
-        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0 flex-wrap justify-end">
-          <button
-            type="button"
-            onClick={toggleHandsFreeMode}
-            aria-pressed={handsFreeMode}
-            title="Chế độ đọc rảnh tay (tự động cuộn văn bản khi đọc/nghe song song)"
-            className={`min-h-[38px] px-2.5 sm:px-3 rounded-xl border text-xs font-semibold inline-flex items-center gap-1.5 transition cursor-pointer ${
-              handsFreeMode
-                ? 'bg-blue-600/15 border-blue-500/60 text-blue-700 dark:text-blue-300'
-                : 'bg-white dark:bg-[#1a1d24] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
-            }`}
-          >
-            <ScrollText className="w-3.5 h-3.5 shrink-0" />
-            <span className="hidden sm:inline">Đọc rảnh tay</span>
-            <span className="sm:hidden">Rảnh tay</span>
-          </button>
+            <div className="min-w-0 flex-1">
+              <div className="text-sm font-semibold text-white truncate drop-shadow-[0_1px_1px_rgba(0,0,0,0.35)]">
+                {chapter.title}
+              </div>
+              <div className="text-[11px] text-slate-300/90 truncate tabular-nums">
+                {chapterIndex + 1}/{story.chapters.length} · {scrollProgressPercent}% ·{' '}
+                {playlistLabel ? playlistLabel : story.title}
+              </div>
+            </div>
 
-          <button
-            type="button"
-            onClick={() => setShowBookmarkModal(true)}
-            aria-pressed={isCurrentPositionBookmarked}
-            title="Lưu Bookmark đoạn tâm đắc hoặc xem Bookmark chương này"
-            className={`min-h-[38px] px-2.5 sm:px-3 rounded-xl border text-xs font-semibold inline-flex items-center gap-1.5 transition cursor-pointer ${
-              isCurrentPositionBookmarked || chapterBookmarks.length > 0
-                ? 'bg-amber-500/18 border-amber-500/60 text-amber-800 dark:text-amber-300'
-                : 'bg-white dark:bg-[#1a1d24] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
-            }`}
-          >
-            {isCurrentPositionBookmarked ? (
-              <BookmarkCheck className="w-3.5 h-3.5 shrink-0" />
-            ) : (
-              <Bookmark className="w-3.5 h-3.5 shrink-0" />
-            )}
-            <span>
-              Bookmark{chapterBookmarks.length > 0 ? ` (${chapterBookmarks.length})` : ''}
-            </span>
-          </button>
-
-          <button
-            type="button"
-            onClick={onToggleBlueLightFilter}
-            aria-pressed={blueLightFilter}
-            title="Chế độ lọc ánh sáng xanh (phủ hổ phách dịu mắt ban đêm)"
-            className={`min-h-[38px] px-2.5 sm:px-3 rounded-xl border text-xs font-semibold inline-flex items-center gap-1.5 transition cursor-pointer ${
-              blueLightFilter
-                ? 'bg-amber-500/18 border-amber-500/60 text-amber-800 dark:text-amber-300'
-                : 'bg-white dark:bg-[#1a1d24] border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
-            }`}
-          >
-            <Eye className="w-3.5 h-3.5 shrink-0" />
-            <span className="hidden sm:inline">Lọc ánh sáng xanh</span>
-            <span className="sm:hidden">Lọc mắt</span>
-          </button>
-
-          <div className="flex items-center rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#1a1d24] p-0.5 shrink-0">
-            {(['sm', 'md', 'lg'] as const).map((sz, i) => (
+            <div className="flex items-center gap-1.5 shrink-0">
               <button
-                key={sz}
-                onClick={() => setFontSize(sz)}
-                className={`min-h-[34px] px-2 sm:px-2.5 rounded-lg text-xs font-semibold cursor-pointer ${
-                  fontSize === sz
-                    ? 'bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900'
-                    : 'text-slate-600 dark:text-slate-400'
+                type="button"
+                onClick={() => setShowBookmarkModal(true)}
+                aria-pressed={isCurrentPositionBookmarked}
+                title="Bookmark đoạn tâm đắc"
+                className={`min-h-[40px] px-2.5 rounded-xl border text-xs font-semibold inline-flex items-center gap-1 whitespace-nowrap shrink-0 transition cursor-pointer ${
+                  isCurrentPositionBookmarked || chapterBookmarks.length > 0
+                    ? 'bg-amber-500/22 border-amber-400/35 text-amber-200'
+                    : 'bg-white/8 border-white/12 text-slate-100 hover:bg-white/15'
                 }`}
               >
-                {i === 0 ? 'A-' : i === 1 ? 'A' : 'A+'}
+                {isCurrentPositionBookmarked ? (
+                  <BookmarkCheck className="w-4 h-4 shrink-0" />
+                ) : (
+                  <Bookmark className="w-4 h-4 shrink-0" />
+                )}
+                {chapterBookmarks.length > 0 && (
+                  <span className="tabular-nums">{chapterBookmarks.length}</span>
+                )}
               </button>
-            ))}
-          </div>
-        </div>
-      </div>
 
-      {/* Compact Chapter Header Card */}
-      <div className="rounded-2xl bg-white dark:bg-[#1a1d24] border border-slate-200 dark:border-slate-800 p-4 flex items-center gap-3.5">
-        <StoryCover
-          title={story.title}
-          cover={story.cover}
-          className="w-12 h-16 sm:w-14 sm:h-18 rounded-xl shrink-0"
-        />
-        <div className="min-w-0 flex-1">
-          <div className="text-xs font-medium text-blue-600 dark:text-blue-400 truncate">
-            {playlistLabel ? `Danh sách phát: ${playlistLabel}` : story.title}
-          </div>
-          <h2 className="text-base sm:text-lg font-bold text-slate-900 dark:text-slate-100 truncate mt-0.5">
-            {chapter.title}
-          </h2>
-          <div className="text-xs text-slate-500 dark:text-slate-400 mt-0.5 flex items-center gap-2 flex-wrap tabular-nums">
-            <span>
-              Chương {chapterIndex + 1}/{story.chapters.length}
-            </span>
-            <span aria-hidden="true">·</span>
-            <span className="inline-flex items-center gap-1">
-              <Lock className="w-3 h-3" />
-              <span>Hỗ trợ khóa màn hình</span>
-            </span>
-          </div>
-        </div>
-      </div>
-
-      {/* Sticky Chapter Reading Progress & Hands-Free Controls Bar */}
-      <div className="sticky top-[calc(3.75rem+env(safe-area-inset-top,0px))] md:top-3 z-20 rounded-2xl bg-white/95 dark:bg-[#1a1d24]/95 backdrop-blur-md border border-slate-200 dark:border-slate-800 px-3.5 py-2.5 shadow-sm space-y-2">
-        <div className="flex items-center justify-between gap-2 text-xs">
-          <div className="flex items-center gap-2 min-w-0">
-            <span className="font-semibold text-slate-700 dark:text-slate-200 truncate">
-              Tiến độ đọc chương
-            </span>
-            <span className="font-bold text-blue-600 dark:text-blue-400 tabular-nums shrink-0">
-              {scrollProgressPercent}%
-            </span>
+              <button
+                type="button"
+                onClick={() => setShowBgPicker((v) => !v)}
+                aria-expanded={showBgPicker}
+                aria-label="Tùy chỉnh hiển thị & màu nền"
+                title="Cỡ chữ, màu nền pastel & tự động cuộn"
+                className={`min-h-[40px] px-2.5 rounded-xl border text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 transition cursor-pointer ${
+                  showBgPicker || readerBgTheme !== 'default'
+                    ? 'bg-blue-500/25 border-blue-400/40 text-blue-200'
+                    : 'bg-white/8 border-white/12 text-slate-100 hover:bg-white/15'
+                }`}
+              >
+                <span
+                  className="w-3.5 h-3.5 rounded-full border border-white/40 shrink-0"
+                  style={{ backgroundColor: activeTheme.swatchHex }}
+                />
+                <Palette className="w-4 h-4 shrink-0" />
+              </button>
+            </div>
           </div>
 
-          {handsFreeMode && (
-            <div className="flex items-center gap-1 shrink-0">
-              {!isNativeAudio && isPlaying ? (
-                <span className="text-[11px] font-medium text-blue-600 dark:text-blue-400 px-2 py-0.5 rounded-lg bg-blue-500/10">
-                  Cuộn theo giọng đọc
-                </span>
-              ) : (
-                <>
-                  {([0.5, 1, 1.5, 2] as const).map((sp) => (
+          {/* Expandable Display & Pastel Theme Panel inside Top Overlay */}
+          {showBgPicker && controlsVisible && (
+            <div className="pb-3.5 pt-2.5 border-t border-white/12 space-y-3 text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center rounded-xl border border-white/15 bg-white/8 p-0.5 shrink-0">
+                  {(['sm', 'md', 'lg'] as const).map((sz, i) => (
                     <button
-                      key={sp}
+                      key={sz}
                       type="button"
-                      onClick={() => updateHandsFreeSpeed(sp)}
-                      className={`min-h-[26px] px-2 rounded-lg text-[11px] font-semibold tabular-nums cursor-pointer ${
-                        handsFreeSpeed === sp
+                      onClick={() => setFontSize(sz)}
+                      className={`min-h-[34px] px-3 rounded-lg text-xs font-semibold cursor-pointer ${
+                        fontSize === sz
                           ? 'bg-blue-600 text-white'
-                          : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700'
+                          : 'text-slate-300 hover:text-white'
                       }`}
                     >
-                      {sp}×
+                      {i === 0 ? 'A-' : i === 1 ? 'A' : 'A+'}
                     </button>
                   ))}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {chunks.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={toggleAutoScrollSync}
+                      aria-pressed={autoScrollSync}
+                      className={`min-h-[36px] px-2.5 rounded-xl border text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer ${
+                        autoScrollSync
+                          ? 'bg-blue-600/25 border-blue-500/60 text-blue-200'
+                          : 'bg-white/5 border-white/10 text-slate-300 hover:bg-white/10'
+                      }`}
+                    >
+                      <LocateFixed className="w-3.5 h-3.5 shrink-0" />
+                      <span>Cuộn theo giọng</span>
+                    </button>
+                  )}
+
                   <button
                     type="button"
-                    onClick={() => setHandsFreePaused((p) => !p)}
-                    aria-label={handsFreePaused ? 'Tiếp tục cuộn' : 'Tạm dừng cuộn'}
-                    className="min-h-[26px] min-w-[26px] flex items-center justify-center rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-700 cursor-pointer"
+                    onClick={toggleHandsFreeMode}
+                    aria-pressed={handsFreeMode}
+                    className={`min-h-[36px] px-2.5 rounded-xl border text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer ${
+                      handsFreeMode
+                        ? 'bg-blue-600/25 border-blue-500/60 text-blue-200'
+                        : 'bg-white/5 border-white/10 text-slate-300 hover:bg-white/10'
+                    }`}
                   >
-                    {handsFreePaused ? (
-                      <Play className="w-3 h-3" />
-                    ) : (
-                      <Pause className="w-3 h-3" />
-                    )}
+                    <ScrollText className="w-3.5 h-3.5 shrink-0" />
+                    <span>Đọc rảnh tay</span>
                   </button>
-                </>
+
+                  <button
+                    type="button"
+                    onClick={onToggleBlueLightFilter}
+                    aria-pressed={blueLightFilter}
+                    className={`min-h-[36px] px-2.5 rounded-xl border text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer ${
+                      blueLightFilter
+                        ? 'bg-amber-500/25 border-amber-500/60 text-amber-200'
+                        : 'bg-white/5 border-white/10 text-slate-300 hover:bg-white/10'
+                    }`}
+                  >
+                    <Eye className="w-3.5 h-3.5 shrink-0" />
+                    <span>Lọc mắt</span>
+                  </button>
+                </div>
+              </div>
+
+              {handsFreeMode && !(isPlaying && autoScrollSync && effectiveChunkIndex >= 0) && (
+                <div className="flex items-center justify-between gap-2 rounded-xl bg-white/5 border border-white/10 px-3 py-2">
+                  <span className="text-[11px] font-medium text-slate-300">Tốc độ cuộn tự động</span>
+                  <div className="flex items-center gap-1">
+                    {([0.5, 1, 1.5, 2] as const).map((sp) => (
+                      <button
+                        key={sp}
+                        type="button"
+                        onClick={() => updateHandsFreeSpeed(sp)}
+                        className={`min-h-[28px] px-2 rounded-lg text-[11px] font-semibold tabular-nums cursor-pointer ${
+                          handsFreeSpeed === sp
+                            ? 'bg-blue-600 text-white'
+                            : 'bg-white/10 text-slate-300 hover:bg-white/20'
+                        }`}
+                      >
+                        {sp}×
+                      </button>
+                    ))}
+                    <button
+                      type="button"
+                      onClick={() => setHandsFreePaused((p) => !p)}
+                      aria-label={handsFreePaused ? 'Tiếp tục cuộn' : 'Tạm dừng cuộn'}
+                      className="min-h-[28px] min-w-[28px] flex items-center justify-center rounded-lg bg-white/10 text-slate-200 hover:bg-white/20 cursor-pointer"
+                    >
+                      {handsFreePaused ? (
+                        <Play className="w-3 h-3" />
+                      ) : (
+                        <Pause className="w-3 h-3" />
+                      )}
+                    </button>
+                  </div>
+                </div>
               )}
+
+              <div className="space-y-1.5">
+                <div className="text-[11px] font-medium text-slate-400">
+                  Màu nền trang đọc (Pastel dịu mắt)
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {READER_PASTEL_THEMES.map((theme) => {
+                    const selected = readerBgTheme === theme.id;
+                    return (
+                      <button
+                        key={theme.id}
+                        type="button"
+                        onClick={() => selectReaderBgTheme(theme.id)}
+                        aria-pressed={selected}
+                        aria-label={`Chọn màu nền ${theme.label}`}
+                        className={`min-h-[36px] px-2.5 rounded-xl border text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 transition cursor-pointer ${
+                          selected
+                            ? 'border-blue-500 bg-blue-500/20 text-white ring-1 ring-blue-400/50'
+                            : 'border-white/10 bg-white/5 text-slate-300 hover:border-white/25'
+                        }`}
+                      >
+                        <span
+                          className="w-4 h-4 rounded-full border border-white/30 shrink-0"
+                          style={{ backgroundColor: theme.swatchHex }}
+                        />
+                        <span>{theme.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
             </div>
           )}
         </div>
-
-        <div
-          role="progressbar"
-          aria-valuenow={scrollProgressPercent}
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-label="Thanh tiến độ đọc của chương"
-          className="h-1.5 w-full rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden"
-        >
-          <div
-            className="h-full rounded-full bg-blue-600 dark:bg-blue-500 transition-[width] duration-150"
-            style={{ width: `${scrollProgressPercent}%` }}
-          />
-        </div>
       </div>
 
-      {/* Synchronized Prose Area */}
+      {/* Full-Bleed Synchronized Prose Area (Tap to show/hide bars, Double-tap sentence to seek) */}
       <div
         ref={proseCardRef}
-        className="rounded-2xl bg-white dark:bg-[#1a1d24] border border-slate-200 dark:border-slate-800 p-5 sm:p-8"
+        onClick={handleProseAreaTap}
+        className="max-w-3xl mx-auto px-5 sm:px-10 pt-[calc(4.75rem+env(safe-area-inset-top,0px))] pb-[calc(11.5rem+env(safe-area-inset-bottom,0px))] cursor-pointer"
       >
-        <div className={`font-serif text-slate-800 dark:text-slate-200 ${proseSizeClass}`}>
+        <header className="mb-7 pb-4 border-b border-black/8 dark:border-white/8">
+          <h2 className={`text-xl sm:text-2xl font-bold leading-snug ${activeTheme.proseTextClass}`}>
+            {chapter.title}
+          </h2>
+          <div className="mt-1.5 flex items-center gap-2 flex-wrap text-xs opacity-65 tabular-nums">
+            <span className={activeTheme.proseTextClass}>{story.title}</span>
+            <span aria-hidden="true" className={activeTheme.proseTextClass}>·</span>
+            <span className={activeTheme.proseTextClass}>
+              Chương {chapterIndex + 1}/{story.chapters.length}
+            </span>
+          </div>
+        </header>
+
+        <div className={`font-serif ${activeTheme.proseTextClass} ${proseSizeClass}`}>
           {paragraphs.map((para) => (
             <p key={para.pIdx} className="mb-5 last:mb-0">
               {para.items.map((item) => {
-                const active = !isNativeAudio && item.idx === chunkIndex;
+                const active = item.idx === effectiveChunkIndex;
                 const isBookmarked = !isNativeAudio && bookmarkedChunkSet.has(item.idx);
+                const canSeekChunk = !isNativeAudio;
+
+                let renderedContent: React.ReactNode = item.text;
+                if (active && (isPlaying || effectiveSubProgress > 0)) {
+                  const tokens = item.text.split(/(\s+)/);
+                  let totalNonWsChars = 0;
+                  const nonWsTokens: { tokenIdx: number; endChar: number }[] = [];
+                  tokens.forEach((tk, idx) => {
+                    if (/\S/.test(tk)) {
+                      totalNonWsChars += tk.length;
+                      nonWsTokens.push({ tokenIdx: idx, endChar: totalNonWsChars });
+                    }
+                  });
+                  let activeWordTokenIdx = -1;
+                  if (nonWsTokens.length > 0 && totalNonWsChars > 0) {
+                    const targetChar = Math.min(
+                      totalNonWsChars - 1,
+                      Math.floor(effectiveSubProgress * totalNonWsChars)
+                    );
+                    const found = nonWsTokens.find((entry) => targetChar < entry.endChar);
+                    activeWordTokenIdx = found
+                      ? found.tokenIdx
+                      : nonWsTokens[nonWsTokens.length - 1].tokenIdx;
+                  }
+
+                  renderedContent = tokens.map((tk, tkIdx) => {
+                    if (tkIdx === activeWordTokenIdx) {
+                      return (
+                        <span
+                          key={tkIdx}
+                          ref={activeWordRef}
+                          className={`rounded px-1 py-0.5 font-semibold transition-colors duration-75 ${activeTheme.activeWordClass}`}
+                        >
+                          {tk}
+                        </span>
+                      );
+                    }
+                    return <React.Fragment key={tkIdx}>{tk}</React.Fragment>;
+                  });
+                }
+
                 return (
                   <span
                     key={item.idx}
                     ref={active ? activeSpanRef : undefined}
-                    onClick={() => {
-                      if (!isNativeAudio) onSeekChunk(item.idx);
+                    onDoubleClick={(e) => {
+                      if (!canSeekChunk) return;
+                      e.stopPropagation();
+                      onSeekChunk(item.idx);
                     }}
-                    title={isBookmarked ? 'Đoạn đã lưu Bookmark' : undefined}
+                    title={
+                      isBookmarked
+                        ? 'Đoạn đã lưu Bookmark (Nhấn đúp để đọc từ đoạn này)'
+                        : canSeekChunk
+                          ? 'Nhấn để ẩn/hiện thanh điều khiển · Nhấn đúp để đọc từ câu này'
+                          : undefined
+                    }
                     className={`rounded px-0.5 transition-colors scroll-mb-52 ${
-                      !isNativeAudio ? 'cursor-pointer hover:bg-blue-500/10' : ''
-                    } ${
                       active
-                        ? 'bg-blue-500/20 dark:bg-blue-500/30 text-slate-950 dark:text-white'
+                        ? activeTheme.activeSentenceClass
                         : isBookmarked
                           ? 'bg-amber-400/15 dark:bg-amber-500/15 underline decoration-amber-500/70 decoration-2 underline-offset-4'
                           : ''
                     }`}
                   >
-                    {item.text}{' '}
+                    {renderedContent}{' '}
                   </span>
                 );
               })}
@@ -728,24 +1062,48 @@ export const ReaderPlayerView: React.FC<Props> = ({
         </div>
       </div>
 
+      {/* Subtle Floating Snap-Back Button when user scrolled away while listening */}
+      {isPlaying && userScrolledAway && (
+        <button
+          type="button"
+          data-reader-chrome="true"
+          onClick={snapBackToActiveSpeech}
+          className={`fixed right-4 z-20 min-h-[38px] px-3 rounded-xl bg-blue-600/85 backdrop-blur-xl backdrop-saturate-150 border border-white/20 text-white text-xs font-semibold shadow-[0_8px_24px_rgba(37,99,235,0.4)] inline-flex items-center gap-1.5 whitespace-nowrap hover:bg-blue-600 cursor-pointer transition-all duration-200 ${
+            controlsVisible
+              ? 'bottom-[calc(9.75rem+env(safe-area-inset-bottom,0px))]'
+              : 'bottom-[calc(1.25rem+env(safe-area-inset-bottom,0px))]'
+          }`}
+        >
+          <LocateFixed className="w-3.5 h-3.5 shrink-0" />
+          <span>Về câu đang đọc</span>
+        </button>
+      )}
+
       {/* Transient Keyboard Shortcut HUD */}
       {shortcutHud && (
         <div
           role="status"
           aria-live="polite"
-          className="fixed bottom-[calc(8.5rem+env(safe-area-inset-bottom,0px))] left-1/2 md:left-[calc(50%+8rem)] -translate-x-1/2 z-40 pointer-events-none px-3.5 py-1.5 rounded-xl bg-slate-900/90 dark:bg-slate-100/95 text-white dark:text-slate-900 text-xs font-semibold shadow-lg backdrop-blur-sm whitespace-nowrap"
+          className="fixed bottom-[calc(9.5rem+env(safe-area-inset-bottom,0px))] left-1/2 md:left-[calc(50%+8rem)] -translate-x-1/2 z-40 pointer-events-none px-3.5 py-1.5 rounded-xl bg-[#0B0E14]/78 border border-white/15 text-white text-xs font-semibold shadow-xl backdrop-blur-xl backdrop-saturate-150 whitespace-nowrap"
         >
           {shortcutHud}
         </div>
       )}
 
-      {/* Fixed Bottom Dock: Progress Bar, Transport Controls & Settings */}
+      {/* Fixed Bottom Dock: Progress Bar, Transport Controls & Settings (Tap screen to show, Scroll to hide) */}
       <div
         role="region"
+        data-reader-chrome="true"
         aria-label="Thanh điều khiển phát và cài đặt"
-        className="fixed bottom-0 left-0 right-0 md:left-64 z-30 pb-safe border-t border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-[#161920]/95 backdrop-blur-md shadow-[0_-8px_24px_rgba(0,0,0,0.08)] dark:shadow-[0_-8px_24px_rgba(0,0,0,0.35)]"
+        className={`dark fixed bottom-0 left-0 right-0 md:left-64 z-30 pb-safe border-t border-white/15 text-slate-100 backdrop-blur-xl backdrop-saturate-150 shadow-[0_-10px_36px_rgba(0,0,0,0.34)] ring-1 ring-inset ring-white/5 transition-all duration-200 ease-out ${
+          drawerTab !== 'none' ? 'bg-[#0B0E14]/84' : 'bg-[#0B0E14]/72'
+        } ${
+          controlsVisible
+            ? 'translate-y-0 opacity-100'
+            : 'translate-y-full opacity-0 pointer-events-none'
+        }`}
       >
-        <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-2.5 sm:py-3 space-y-2">
+        <div className="max-w-3xl mx-auto px-4 sm:px-6 py-2.5 sm:py-3 space-y-2">
           {/* Expandable Bottom Drawer: Settings or Equalizer */}
           {drawerTab === 'eq' && (
             <div className="max-h-[48vh] overflow-y-auto pb-2.5 mb-1 border-b border-slate-200/80 dark:border-slate-800 space-y-3 text-xs">
@@ -1327,6 +1685,40 @@ export const ReaderPlayerView: React.FC<Props> = ({
                 </button>
               </div>
 
+              <div className="sm:col-span-2 rounded-xl bg-slate-50 dark:bg-[#111318] border border-slate-200 dark:border-slate-800 px-3.5 py-2.5 space-y-2">
+                <div className="flex items-center gap-2 text-slate-700 dark:text-slate-300">
+                  <Palette className="w-4 h-4 text-blue-500 shrink-0" />
+                  <span className="font-medium text-slate-800 dark:text-slate-200">
+                    Màu nền trang đọc (Pastel dịu mắt)
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  {READER_PASTEL_THEMES.map((theme) => {
+                    const selected = readerBgTheme === theme.id;
+                    return (
+                      <button
+                        key={theme.id}
+                        type="button"
+                        onClick={() => selectReaderBgTheme(theme.id)}
+                        aria-pressed={selected}
+                        aria-label={`Chọn màu nền ${theme.label}`}
+                        className={`min-h-[36px] px-2.5 rounded-xl border text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 transition cursor-pointer ${
+                          selected
+                            ? 'border-blue-600 bg-blue-600/10 text-blue-700 dark:text-blue-300 ring-1 ring-blue-500/40'
+                            : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-[#1a1d24] text-slate-700 dark:text-slate-300 hover:border-blue-400'
+                        }`}
+                      >
+                        <span
+                          className="w-4 h-4 rounded-full border border-black/15 dark:border-white/25 shrink-0"
+                          style={{ backgroundColor: theme.swatchHex }}
+                        />
+                        <span>{theme.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
               <div className="sm:col-span-2 flex items-center justify-between gap-3 rounded-xl bg-slate-50 dark:bg-[#111318] border border-slate-200 dark:border-slate-800 px-3.5 py-2.5">
                 <div className="flex items-center gap-2 text-slate-700 dark:text-slate-300 min-w-0">
                   <Eye className="w-4 h-4 text-amber-500 shrink-0" />
@@ -1459,84 +1851,111 @@ export const ReaderPlayerView: React.FC<Props> = ({
             )}
           </div>
 
-          {/* Transport Controls + Quick Speed & Settings Toggle */}
-          <div className="flex items-center justify-between gap-2">
+          {/* Primary Transport Controls Row */}
+          <div className="flex items-center justify-around sm:justify-center sm:gap-6">
+            <button
+              type="button"
+              onClick={() =>
+                isNativeAudio
+                  ? onSeekAudioTime(Math.max(0, audioCurrentTime - 15))
+                  : onSeekChunk(Math.max(0, chunkIndex - 1))
+              }
+              title={isNativeAudio ? 'Lùi 15 giây' : 'Câu trước'}
+              aria-label={isNativeAudio ? 'Lùi 15 giây' : 'Câu trước'}
+              className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-full text-slate-100 hover:bg-white/12 cursor-pointer transition-colors"
+            >
+              <RotateCcw className="w-5 h-5" />
+            </button>
+
+            <button
+              type="button"
+              onClick={onPrevChapter}
+              title="Chương trước (←)"
+              aria-label="Chương trước"
+              className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-full text-slate-100 hover:bg-white/12 cursor-pointer transition-colors"
+            >
+              <SkipBack className="w-5 h-5" />
+            </button>
+
+            <button
+              type="button"
+              onClick={onTogglePlay}
+              title={isPlaying ? 'Tạm dừng (Space)' : 'Phát (Space)'}
+              aria-label={isPlaying ? 'Tạm dừng' : 'Phát'}
+              className="w-12 h-12 rounded-full bg-blue-600/95 text-white flex items-center justify-center shadow-[0_4px_20px_rgba(37,99,235,0.45)] ring-1 ring-white/25 hover:bg-blue-500 active:scale-95 transition cursor-pointer shrink-0"
+            >
+              {isPlaying ? (
+                <Pause className="w-5 h-5" />
+              ) : (
+                <Play className="w-5 h-5 ml-0.5" />
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={onNextChapter}
+              title="Chương sau (→)"
+              aria-label="Chương sau"
+              className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-full text-slate-100 hover:bg-white/12 cursor-pointer transition-colors"
+            >
+              <SkipForward className="w-5 h-5" />
+            </button>
+
+            <button
+              type="button"
+              onClick={() =>
+                isNativeAudio
+                  ? onSeekAudioTime(Math.min(audioDuration || 0, audioCurrentTime + 15))
+                  : onSeekChunk(Math.min(Math.max(0, chunks.length - 1), chunkIndex + 1))
+              }
+              title={isNativeAudio ? 'Tiến 15 giây' : 'Câu sau'}
+              aria-label={isNativeAudio ? 'Tiến 15 giây' : 'Câu sau'}
+              className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-full text-slate-100 hover:bg-white/12 cursor-pointer transition-colors"
+            >
+              <RotateCw className="w-5 h-5" />
+            </button>
+          </div>
+
+          {/* Secondary Utility Controls Row */}
+          <div className="flex items-center justify-between gap-1.5 pt-1.5 border-t border-white/12">
             <button
               type="button"
               onClick={cycleRate}
               title="Đổi nhanh tốc độ đọc"
-              className="min-h-[38px] min-w-[52px] px-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#111318] text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 tabular-nums whitespace-nowrap shrink-0 cursor-pointer"
+              className="min-h-[36px] min-w-[50px] px-2.5 rounded-xl border border-white/15 bg-white/8 text-xs font-semibold text-slate-100 hover:bg-white/15 tabular-nums whitespace-nowrap shrink-0 cursor-pointer transition-colors"
             >
               {formatRateLabel(rate)}×
             </button>
 
-            <div className="flex items-center justify-center gap-1 sm:gap-3">
-              <button
-                onClick={onPrevChapter}
-                title="Chương trước (←)"
-                className="min-h-[42px] min-w-[42px] flex items-center justify-center rounded-full text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
-              >
-                <SkipBack className="w-5 h-5" />
-              </button>
-
-              <button
-                onClick={() =>
-                  isNativeAudio
-                    ? onSeekAudioTime(Math.max(0, audioCurrentTime - 15))
-                    : onSeekChunk(Math.max(0, chunkIndex - 1))
-                }
-                title={isNativeAudio ? 'Lùi 15 giây' : 'Câu trước'}
-                className="min-h-[42px] min-w-[42px] flex items-center justify-center rounded-full text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
-              >
-                <RotateCcw className="w-5 h-5" />
-              </button>
-
-              <button
-                onClick={onTogglePlay}
-                title={isPlaying ? 'Tạm dừng (Space)' : 'Phát (Space)'}
-                aria-label={isPlaying ? 'Tạm dừng' : 'Phát'}
-                className="w-12 h-12 rounded-full bg-blue-600 text-white flex items-center justify-center shadow-md hover:bg-blue-700 active:scale-95 transition cursor-pointer shrink-0"
-              >
-                {isPlaying ? (
-                  <Pause className="w-5 h-5" />
-                ) : (
-                  <Play className="w-5 h-5 ml-0.5" />
-                )}
-              </button>
-
-              <button
-                onClick={() =>
-                  isNativeAudio
-                    ? onSeekAudioTime(Math.min(audioDuration || 0, audioCurrentTime + 15))
-                    : onSeekChunk(Math.min(Math.max(0, chunks.length - 1), chunkIndex + 1))
-                }
-                title={isNativeAudio ? 'Tiến 15 giây' : 'Câu sau'}
-                className="min-h-[42px] min-w-[42px] flex items-center justify-center rounded-full text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
-              >
-                <RotateCw className="w-5 h-5" />
-              </button>
-
-              <button
-                onClick={onNextChapter}
-                title="Chương sau (→)"
-                className="min-h-[42px] min-w-[42px] flex items-center justify-center rounded-full text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
-              >
-                <SkipForward className="w-5 h-5" />
-              </button>
-            </div>
-
             <div className="flex items-center gap-1.5 shrink-0">
+              {chunks.length > 0 && (
+                <button
+                  type="button"
+                  onClick={toggleAutoScrollSync}
+                  aria-pressed={autoScrollSync}
+                  title="Tự động cuộn văn bản theo dòng và từ đang đọc"
+                  className={`min-h-[36px] px-2.5 rounded-xl border text-xs font-semibold inline-flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
+                    autoScrollSync
+                      ? 'border-blue-400/50 bg-blue-500/22 text-blue-200'
+                      : 'border-white/15 bg-white/8 text-slate-200 hover:bg-white/15'
+                  }`}
+                >
+                  <LocateFixed className="w-3.5 h-3.5 shrink-0" />
+                  <span className="hidden xs:inline sm:inline">Cuộn</span>
+                </button>
+              )}
+
               <button
                 type="button"
                 onClick={() => setDrawerTab((t) => (t === 'filter' ? 'none' : 'filter'))}
                 aria-expanded={drawerTab === 'filter'}
                 title="Bộ lọc âm thanh nâng cao (Khử nhiễu & Độ vang)"
-                className={`min-h-[38px] px-2.5 rounded-xl border text-xs font-semibold inline-flex items-center gap-1 cursor-pointer ${
+                className={`min-h-[36px] px-2.5 rounded-xl border text-xs font-semibold inline-flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
                   drawerTab === 'filter'
-                    ? 'border-blue-500 bg-blue-600 text-white'
+                    ? 'border-blue-400/60 bg-blue-600/90 text-white'
                     : advFilter.denoising > 0 || advFilter.reverb > 0
-                      ? 'border-blue-500/40 bg-blue-500/10 text-blue-700 dark:text-blue-300'
-                      : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#111318] text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800'
+                      ? 'border-blue-400/50 bg-blue-500/22 text-blue-200'
+                      : 'border-white/15 bg-white/8 text-slate-100 hover:bg-white/15'
                 }`}
               >
                 <Waves className="w-4 h-4 shrink-0" />
@@ -1548,12 +1967,12 @@ export const ReaderPlayerView: React.FC<Props> = ({
                 onClick={() => setDrawerTab((t) => (t === 'eq' ? 'none' : 'eq'))}
                 aria-expanded={drawerTab === 'eq'}
                 title="Bộ chỉnh âm (Equalizer)"
-                className={`min-h-[38px] px-2.5 rounded-xl border text-xs font-semibold inline-flex items-center gap-1 cursor-pointer ${
+                className={`min-h-[36px] px-2.5 rounded-xl border text-xs font-semibold inline-flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
                   drawerTab === 'eq'
-                    ? 'border-blue-500 bg-blue-600 text-white'
+                    ? 'border-blue-400/60 bg-blue-600/90 text-white'
                     : eqPreset !== 'flat'
-                      ? 'border-blue-500/40 bg-blue-500/10 text-blue-700 dark:text-blue-300'
-                      : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#111318] text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800'
+                      ? 'border-blue-400/50 bg-blue-500/22 text-blue-200'
+                      : 'border-white/15 bg-white/8 text-slate-100 hover:bg-white/15'
                 }`}
               >
                 <AudioLines className="w-4 h-4 shrink-0" />
@@ -1565,14 +1984,14 @@ export const ReaderPlayerView: React.FC<Props> = ({
                 onClick={() => setDrawerTab((t) => (t === 'settings' ? 'none' : 'settings'))}
                 aria-expanded={drawerTab === 'settings'}
                 title="Cài đặt phát"
-                className={`min-h-[38px] px-2.5 sm:px-3 rounded-xl border text-xs font-semibold inline-flex items-center gap-1 shrink-0 cursor-pointer ${
+                className={`min-h-[36px] px-2.5 sm:px-3 rounded-xl border text-xs font-semibold inline-flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
                   drawerTab === 'settings'
-                    ? 'border-blue-500 bg-blue-600 text-white'
-                    : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#111318] text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800'
+                    ? 'border-blue-400/60 bg-blue-600/90 text-white'
+                    : 'border-white/15 bg-white/8 text-slate-100 hover:bg-white/15'
                 }`}
               >
                 <SlidersHorizontal className="w-4 h-4 shrink-0" />
-                <span className="hidden sm:inline">Cài đặt</span>
+                <span>Cài đặt</span>
                 {sleepMinutes > 0 && (
                   <span className="text-[10px] font-bold tabular-nums opacity-90">
                     {sleepMinutes}p
@@ -1592,6 +2011,7 @@ export const ReaderPlayerView: React.FC<Props> = ({
       {/* Chapter Bookmark Modal */}
       {showBookmarkModal && (
         <div
+          data-reader-chrome="true"
           className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm p-4"
           onClick={() => setShowBookmarkModal(false)}
         >
